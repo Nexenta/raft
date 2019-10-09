@@ -23,10 +23,7 @@ int uvIpParse(const char *address, struct sockaddr_in *addr)
         port = "8080";
     }
 
-    rv = uv_ip4_addr(host, atoi(port), addr);
-    if (rv != 0) {
-        return RAFT_NOCONNECTION;
-    }
+    *addr = uv_ip4_addr(host, atoi(port));
 
     return 0;
 }

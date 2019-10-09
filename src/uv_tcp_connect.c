@@ -177,7 +177,7 @@ static int startConnecting(struct connect *r, const char *address)
         goto err_after_tcp_init;
     }
 
-    rv = uv_tcp_connect(&r->connect, r->tcp, (struct sockaddr *)&addr,
+    rv = uv_tcp_connect(&r->connect, r->tcp, addr,
                         connectCb);
     if (rv != 0) {
         /* UNTESTED: since parsing succeed, this should fail only because of

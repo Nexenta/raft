@@ -229,7 +229,7 @@ static void flushQueue(struct uvClient *c)
     c->n_send_reqs = 0;
 }
 
-static void timerCb(uv_timer_t *timer)
+static void timerCb(uv_timer_t *timer, int status)
 {
     struct uvClient *c = timer->data;
     assert(c->state == DELAY);

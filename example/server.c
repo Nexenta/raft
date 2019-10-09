@@ -115,7 +115,7 @@ static void fsmClose(struct raft_fsm *f)
 
 struct server
 {
-    struct uv_loop_s loop;              /* UV loop. */
+    struct uv_loop_s *loop;              /* UV loop. */
     struct uv_signal_s sigint;          /* To catch SIGINT and exit. */
     struct uv_timer_s timer;            /* To periodically apply a new entry. */
     const char *dir;                    /* Data dir of UV I/O backend. */
@@ -175,34 +175,31 @@ static int serverInit(struct server *s, const char *dir, unsigned id)
     srandom(now.tv_nsec ^ now.tv_sec);
 
     /* Initialize the libuv loop. */
-    rv = uv_loop_init(&s->loop);
-    if (rv != 0) {
-        goto err;
-    }
-    s->loop.data = s;
+    s->loop = uv_loop_new();
+    s->loop->data = s;
 
     /* Add a signal handler to stop the Raft engine upon SIGINT. */
-    rv = uv_signal_init(&s->loop, &s->sigint);
+    rv = uv_signal_init(s->loop, &s->sigint);
     if (rv != 0) {
         goto errAfterLoopInit;
     }
     s->sigint.data = s;
 
     /* Add a timer to periodically try to propose a new entry. */
-    rv = uv_timer_init(&s->loop, &s->timer);
+    rv = uv_timer_init(s->loop, &s->timer);
     if (rv != 0) {
         goto errAfterSigintInit;
     }
     s->timer.data = s;
 
     /* Initialize the TCP-based RPC transport. */
-    rv = raft_uv_tcp_init(&s->transport, &s->loop);
+    rv = raft_uv_tcp_init(&s->transport, s->loop);
     if (rv != 0) {
         goto errAfterTimerInit;
     }
 
     /* Initialize the libuv-based I/O backend. */
-    rv = raft_uv_init(&s->io, &s->loop, dir, &s->transport);
+    rv = raft_uv_init(&s->io, s->loop, dir, &s->transport);
     if (rv != 0) {
         goto errAfterTcpInit;
     }
@@ -268,7 +265,7 @@ errAfterTimerInit:
 errAfterSigintInit:
     uv_close((struct uv_handle_s *)&s->sigint, NULL);
 errAfterLoopInit:
-    uv_loop_close(&s->loop);
+    uv_loop_delete(s->loop);
 err:
     return rv;
 }
@@ -279,7 +276,7 @@ static void serverClose(struct server *s)
     fsmClose(&s->fsm);
     raft_uv_close(&s->io);
     raft_uv_tcp_close(&s->transport);
-    uv_loop_close(&s->loop);
+    uv_loop_delete(s->loop);
 }
 
 /* Called after a request to apply a new command to the FSM has been
@@ -302,7 +299,7 @@ static void applyCb(struct raft_apply *req, int status, void *result)
 }
 
 /* Called periodically every APPLY_RATE milliseconds. */
-static void timerCb(uv_timer_t *timer)
+static void timerCb(uv_timer_t *timer, int status)
 {
     struct server *s = timer->data;
     struct raft_buffer buf;
@@ -355,7 +352,7 @@ static int serverStart(struct server *s)
     }
 
     /* Run the event loop until we receive SIGINT. */
-    rv = uv_run(&s->loop, UV_RUN_DEFAULT);
+    rv = uv_run(s->loop, UV_RUN_DEFAULT);
     if (rv != 0) {
         goto errAfterTimerStart;
     }
@@ -371,7 +368,7 @@ errAfterRaftStart:
 err:
     uv_close((struct uv_handle_s *)&s->timer, NULL);
     uv_close((struct uv_handle_s *)&s->sigint, NULL);
-    uv_run(&s->loop, UV_RUN_NOWAIT);
+    uv_run(s->loop, UV_RUN_NOWAIT);
     return rv;
 }
 

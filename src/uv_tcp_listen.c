@@ -43,14 +43,12 @@ struct conn
 };
 
 /* Read the preamble of the handshake. */
-static void preambleAllocCb(struct uv_handle_s *handle,
-                            size_t suggested_size,
-                            uv_buf_t *buf)
+static uv_buf_t preambleAllocCb(struct uv_handle_s *handle,
+                            size_t suggested_size)
 {
     struct conn *c = handle->data;
     (void)suggested_size;
-    buf->base = (char *)c->handshake.preamble + c->handshake.nread;
-    buf->len = sizeof c->handshake.preamble - c->handshake.nread;
+    return uv_buf_init((char *)c->handshake.preamble + c->handshake.nread, sizeof c->handshake.preamble - c->handshake.nread);
 }
 
 /* Decode the handshake preamble, containing the protocol version, the ID of the
@@ -98,27 +96,23 @@ static void closeConn(struct conn *c)
 }
 
 /* Read the address part of the handshake. */
-static void addressAllocCb(struct uv_handle_s *handle,
-                           size_t suggested_size,
-                           uv_buf_t *buf)
+static uv_buf_t addressAllocCb(struct uv_handle_s *handle,
+                           size_t suggested_size)
 {
     struct conn *c = handle->data;
     (void)suggested_size;
-    buf->base = c->handshake.address.base + c->handshake.nread;
-    buf->len = c->handshake.address.len - c->handshake.nread;
+    return uv_buf_init(c->handshake.address.base + c->handshake.nread, c->handshake.address.len - c->handshake.nread);
 }
 
 static void addressReadCb(uv_stream_t *stream,
                           ssize_t nread,
-                          const uv_buf_t *buf)
+                          const uv_buf_t buf)
 {
     struct conn *c = stream->data;
     char *address;
     unsigned id;
     size_t n;
     int rv;
-
-    (void)buf;
 
     if (nread == 0) {
         /* Empty read just ignore it. */
@@ -155,13 +149,11 @@ static void addressReadCb(uv_stream_t *stream,
 
 static void preambleReadCb(uv_stream_t *stream,
                            ssize_t nread,
-                           const uv_buf_t *buf)
+                           const uv_buf_t buf)
 {
     struct conn *c = stream->data;
     size_t n;
     int rv;
-
-    (void)buf;
 
     if (nread == 0) {
         /* Empty read just ignore it. */
@@ -276,7 +268,7 @@ int uvTcpListen(struct raft_uv_transport *transport, raft_uv_accept_cb cb)
     if (rv != 0) {
         return rv;
     }
-    rv = uv_tcp_bind(&t->listener, (const struct sockaddr *)&addr, 0);
+    rv = uv_tcp_bind(&t->listener, addr);
     if (rv != 0) {
         /* UNTESTED: what are the error conditions? */
         return RAFT_IOERR;

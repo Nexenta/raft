@@ -154,7 +154,7 @@ static void processRequests(struct uv *uv)
     uv->truncate_work.data = r;
     rv = uv_queue_work(uv->loop, &uv->truncate_work, workCb, afterWorkCb);
     if (rv != 0) {
-        uvErrorf(uv, "truncate index %lld: %s", r->index, uv_strerror(rv));
+        uvErrorf(uv, "truncate index %lld: %s", r->index, uv_strerror(uv_last_error(uv->loop)));
         uv->truncate_work.data = NULL;
         uv->errored = true;
     }

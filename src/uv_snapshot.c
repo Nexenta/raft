@@ -505,7 +505,7 @@ static void processPutRequests(struct uv *uv)
                        putAfterWorkCb);
     if (rv != 0) {
         uvErrorf(uv, "store snapshot %lld: %s", r->snapshot->index,
-                 uv_strerror(rv));
+                 uv_strerror(uv_last_error(uv->loop)));
         uv->errored = true;
     }
 }
@@ -666,7 +666,7 @@ int uvSnapshotGet(struct raft_io *io,
     QUEUE_PUSH(&uv->snapshot_get_reqs, &r->queue);
     rv = uv_queue_work(uv->loop, &r->work, getWorkCb, getAfterWorkCb);
     if (rv != 0) {
-        uvErrorf(uv, "get last snapshot: %s", uv_strerror(rv));
+        uvErrorf(uv, "get last snapshot: %s", uv_strerror(uv_last_error(uv->loop)));
         rv = RAFT_IOERR;
         goto err_after_snapshot_alloc;
     }

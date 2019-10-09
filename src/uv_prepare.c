@@ -196,7 +196,7 @@ static int prepareSegment(struct uv *uv)
 
     rv = uvFileInit(s->file, uv->loop, uv->direct_io, uv->async_io, errmsg);
     if (rv != 0) {
-        uvErrorf(uv, "init segment file %d: %s", s->counter, uv_strerror(rv));
+        uvErrorf(uv, "init segment file %d: %s", s->counter, uv_strerror(uv_last_error(uv->loop)));
         rv = RAFT_IOERR;
         goto err_after_file_alloc;
     }

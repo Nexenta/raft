@@ -1,5 +1,6 @@
 #include "uv_file.h"
 
+#include <errno.h>
 #include <libgen.h>
 #include <stdlib.h>
 #include <string.h>
@@ -342,7 +343,7 @@ static void createAfterWorkCb(uv_work_t *work, int status)
         rv = uv_poll_start(&f->event_poller, UV_READABLE, writePollCb);
         if (rv != 0) {
             /* UNTESTED: the underlying libuv calls should never fail. */
-            uvErrMsgPrintf(req->errmsg, "uv_poll_start: %s", uv_strerror(rv));
+            uvErrMsgPrintf(req->errmsg, "uv_poll_start: %s", uv_strerror(uv_last_error(f->loop)));
             uvIoDestroy(f->ctx, errmsg);
             close(f->event_fd);
             close(f->fd);
@@ -393,7 +394,7 @@ int uvFileInit(struct uvFile *f,
     if (rv != 0) {
         /* UNTESTED: with the current libuv implementation this should never
          * fail. */
-        uvErrMsgPrintf(errmsg, "uv_poll_init: %s", uv_strerror(rv));
+        uvErrMsgPrintf(errmsg, "uv_poll_init: %s", uv_strerror(uv_last_error(f->loop)));
         rv = UV__ERROR;
         goto err_after_event_fd;
     }
@@ -475,7 +476,7 @@ int uvFileCreate(struct uvFile *f,
     rv = uv_queue_work(f->loop, &req->work, createWorkCb, createAfterWorkCb);
     if (rv != 0) {
         /* UNTESTED: with the current libuv implementation this can't fail. */
-        uvErrMsgPrintf(errmsg, "uv_queue_work: %s", uv_strerror(rv));
+        uvErrMsgPrintf(errmsg, "uv_queue_work: %s", uv_strerror(uv_last_error(f->loop)));
         rv = UV__ERROR;
         goto err_after_open;
     }
@@ -614,7 +615,7 @@ int uvFileWrite(struct uvFile *f,
     rv = uv_queue_work(f->loop, &req->work, writeWorkCb, writeAfterWorkCb);
     if (rv != 0) {
         /* UNTESTED: with the current libuv implementation this can't fail. */
-        uvErrMsgPrintf(errmsg, "uv_queue_work: %s", uv_strerror(rv));
+        uvErrMsgPrintf(errmsg, "uv_queue_work: %s", uv_strerror(uv_last_error(f->loop)));
         rv = UV__ERROR;
         goto err;
     }

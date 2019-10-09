@@ -90,7 +90,7 @@ err:
 }
 
 /* Periodic timer callback */
-static void timerCb(uv_timer_t *timer)
+static void timerCb(uv_timer_t *timer, int status)
 {
     struct uv *uv;
     uv = timer->data;

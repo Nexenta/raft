@@ -93,7 +93,7 @@ static int finalizeSegment(struct segment *s)
     rv = uv_queue_work(uv->loop, &uv->finalize_work, workCb, afterWorkCb);
     if (rv != 0) {
         uvErrorf(uv, "start to truncate segment file %d: %s", s->counter,
-                 uv_strerror(rv));
+                 uv_strerror(uv_last_error(uv->loop)));
         return RAFT_IOERR;
     }
 

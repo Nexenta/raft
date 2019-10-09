@@ -110,7 +110,7 @@ static void closeServer(struct uvServer *s)
 
 /* Invoked to initialize the read buffer for the next asynchronous read on the
  * socket. */
-static void allocCb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
+static uv_buf_t allocCb(uv_handle_t *handle, size_t suggested_size)
 {
     struct uvServer *s = handle->data;
     (void)suggested_size;
@@ -138,8 +138,9 @@ static void allocCb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
             if (s->header.base == NULL) {
                 /* Setting all buffer fields to 0 will make read_cb fail with
                  * ENOBUFS. */
-                memset(buf, 0, sizeof *buf);
-                return;
+                uv_buf_t buf;
+                memset(&buf, 0, sizeof buf);
+                return buf;
             }
             s->buf = s->header;
             goto out;
@@ -151,15 +152,16 @@ static void allocCb(uv_handle_t *handle, size_t suggested_size, uv_buf_t *buf)
         if (s->payload.base == NULL) {
             /* Setting all buffer fields to 0 will make read_cb fail with
              * ENOBUFS. */
-            memset(buf, 0, sizeof *buf);
-            return;
+            uv_buf_t buf;
+            memset(&buf, 0, sizeof buf);
+            return buf;
         }
 
         s->buf = s->payload;
     }
 
 out:
-    *buf = s->buf;
+    return s->buf;
 }
 
 /* Remove the given server connection */
@@ -216,12 +218,10 @@ static void recvMessage(struct uvServer *s)
 }
 
 /* Callback invoked when data has been read from the socket. */
-static void readCb(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf)
+static void readCb(uv_stream_t *stream, ssize_t nread, const uv_buf_t buf)
 {
     struct uvServer *s = stream->data;
     int rv;
-
-    (void)buf;
 
     /* If the read was successful, let's check if we have received all the data
      * we expected. */
@@ -326,7 +326,7 @@ static void readCb(uv_stream_t *stream, ssize_t nread, const uv_buf_t *buf)
     assert(nread < 0);
 
     if (nread != UV_EOF) {
-        uvWarnf(s->uv, "receive data: %s", uv_strerror(nread));
+        uvWarnf(s->uv, "receive data: %s", uv_strerror(uv_last_error(s->uv->loop)));
     }
 
 abort:
@@ -341,7 +341,7 @@ static int startServer(struct uvServer *s)
 
     rv = uv_read_start(s->stream, allocCb, readCb);
     if (rv != 0) {
-        uvWarnf(s->uv, "start reading: %s", uv_strerror(rv));
+        uvWarnf(s->uv, "start reading: %s", uv_strerror(uv_last_error(s->uv->loop)));
         return RAFT_IOERR;
     }
 
