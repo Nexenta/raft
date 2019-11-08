@@ -57,7 +57,34 @@ int uvEnsureDir(const uvDir dir, char *errmsg)
 
 int uvSyncDir(const uvDir dir, char *errmsg)
 {
+    /* TODO: consider to export ccowfs_inode_flusher() */
     return 0;
+}
+
+static int
+recursive_walk(inode_t parent, fsio_dir_entry *dir_entry, uint64_t count, void *ptr)
+{
+	uint64_t i;
+	ci_t *ci = ptr;
+
+	for (i=0; i< count; i++) {
+		if (dir_entry[i].name[0] == '.' && (dir_entry[i].name[1] == '\0' ||
+			    (dir_entry[i].name[1] == '.' && dir_entry[i].name[2] == '\0')))
+			continue;
+
+		if (ccow_fsio_is_dir(ci, dir_entry[i].inode)) {
+			bool eof;
+			ccow_fsio_readdir_cb4(ci, dir_entry[i].inode, recursive_walk, 0, NULL, &eof);
+		}
+		if (dir_entry[i].inode != CCOW_FSIO_ROOT_INODE &&
+		    dir_entry[i].inode != CCOW_FSIO_LOST_FOUND_DIR_INODE) {
+// FIXME: implement, need to pass struct via ptr and fill in here...
+//			int err = ccow_fsio_delete(ci, parent, dir_entry[i].name);
+//			munit_assert_int(err, ==, 0);
+		}
+	}
+
+	return (0);
 }
 
 int uvScanDir(const uvDir dir,
@@ -65,6 +92,15 @@ int uvScanDir(const uvDir dir,
               int *n_entries,
               char *errmsg)
 {
+    inode_t di;
+    ci_t *ci = findFSExportByDir((char*)dir, &di);
+    if (!ci || di == 0)
+        return UV__ERROR;
+
+    bool eof;
+    int err = ccow_fsio_readdir_cb4(ci, di, recursive_walk, 0, ci, &eof);
+    if (err)
+        return UV__ERROR;
     return 0;
 }
 
@@ -142,7 +178,17 @@ int uvStatFile(const uvDir dir,
                struct stat *sb,
                char *errmsg)
 {
-    return 0;
+    inode_t di;
+    ci_t *ci = findFSExportByDir((char*)dir, &di);
+    if (!ci || di == 0)
+        return UV__ERROR;
+    int err;
+    inode_t ino;
+    err = ccow_fsio_lookup(ci, di, (char*)filename, &ino);
+    if (err)
+        return UV__ERROR;
+    err = ccow_fsio_get_file_stat(ci, ino, sb);
+    return err;
 }
 
 int uvUnlinkFile(const char *dir, const char *filename, char *errmsg)
@@ -156,7 +202,10 @@ int uvUnlinkFile(const char *dir, const char *filename, char *errmsg)
 
 int uvFtruncate(uvFd fd, off_t length)
 {
-	return 0;
+    /* FIXME: missing ccow_fsio_truncate() support
+    struct uvFile *f = fd;
+    */
+    return 0;
 }
 
 int uvFsync(uvFd fd)
@@ -181,11 +230,34 @@ int uvRenameFile(const uvDir dir,
 
 int uvReadFully(const uvFd fd, void *buf, const size_t n, char *errmsg)
 {
+    struct uvFile *f = fd;
+    size_t read_amount;
+    int eof;
+    int err = ccow_fsio_read(f->file, f->offset, n, buf, &read_amount, &eof);
+    if (err) {
+        uvErrMsgSys(errmsg, read, err);
+        return UV__ERROR;
+    }
+    if (read_amount < n) {
+        uvErrMsgPrintf(errmsg, "short read: %d bytes instead of %ld", (int)read_amount, n);
+        return UV__NODATA;
+    }
     return 0;
 }
 
 int uvWriteFully(const uvFd fd, void *buf, const size_t n, char *errmsg)
 {
+    struct uvFile *f = fd;
+    size_t write_amount;
+    int err = ccow_fsio_write(f->file, f->offset, n, buf, &write_amount);
+    if (err) {
+        uvErrMsgSys(errmsg, write, err);
+        return UV__ERROR;
+    }
+    if (write_amount < n) {
+        uvErrMsgPrintf(errmsg, "short write: %d bytes instead of %ld", (int)write_amount, n);
+        return UV__NODATA;
+    }
     return 0;
 }
 
@@ -199,11 +271,14 @@ off_t uvLseek(uvFd fd, off_t offset, int whence)
         f->offset += offset;
         return f->offset;
     } else if (whence == SEEK_END) {
-	struct stat stat;
-	int err = ccow_fsio_get_file_stat(f->ci, f->inode, &stat);
+        struct stat stat;
+        int err = ccow_fsio_get_file_stat(f->ci, f->inode, &stat);
+        if (err)
+            return (off_t) -1;
+        f->offset = stat.st_size + offset;
     } else
         assert(0);
-    return 0;
+    return f->offset;
 }
 
 ssize_t uvWritev(uvFd fd, const struct iovec *iov, int iovcnt)
