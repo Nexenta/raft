@@ -45,7 +45,7 @@ static int loadFile(struct uv *uv,
 {
     uvFilename filename; /* Filename of the metadata file */
     uint8_t buf[SIZE];   /* Content of metadata file */
-    int fd;
+    uvFd fd;
     char errmsg[2048];
     int rv;
 
@@ -77,11 +77,11 @@ static int loadFile(struct uv *uv,
         /* Assume that the server crashed while writing this metadata file, and
          * pretend it has not been written at all. */
         uvWarnf(uv, "read %s: ignore incomplete data", filename);
-        close(fd);
+        uvCloseFile(fd);
         return 0;
     };
 
-    close(fd);
+    uvCloseFile(fd);
 
     /* Decode the content of the metadata file. */
     rv = decode(buf, metadata);
@@ -192,7 +192,7 @@ int uvMetadataStore(struct uv *uv, const struct uvMetadata *metadata)
     uint8_t buf[SIZE];   /* Content of metadata file */
     const int flags = O_WRONLY | O_CREAT | O_SYNC | O_TRUNC;
     unsigned short n;
-    int fd;
+    uvFd fd;
     char errmsg[2048];
     int rv;
 
@@ -213,7 +213,7 @@ int uvMetadataStore(struct uv *uv, const struct uvMetadata *metadata)
     }
 
     rv = uvWriteFully(fd, buf, sizeof buf, errmsg);
-    close(fd);
+    uvCloseFile(fd);
     if (rv != 0) {
         uvErrorf(uv, "write %s: %s", filename, errmsg);
         return RAFT_IOERR;

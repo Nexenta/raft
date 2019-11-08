@@ -402,9 +402,9 @@ TEST_CASE(error, oom, error_oom_params)
 
     test_heap_fault_enable(&f->heap);
 
-    uv_run(&f->loop, UV_RUN_NOWAIT);
-    uv_run(&f->loop, UV_RUN_NOWAIT);
-    uv_run(&f->loop, UV_RUN_NOWAIT);
+    uv_run(f->loop, UV_RUN_NOWAIT);
+    uv_run(f->loop, UV_RUN_NOWAIT);
+    uv_run(f->loop, UV_RUN_NOWAIT);
 
     munit_assert_false(f->invoked);
 

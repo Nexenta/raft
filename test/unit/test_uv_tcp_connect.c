@@ -37,7 +37,7 @@ static void *setup(const MunitParameter params[], void *user_data)
     test_heap_setup(params, &f->heap);
     test_tcp_setup(params, &f->tcp);
     SETUP_LOOP;
-    raft_uv_tcp_init(&f->transport, &f->loop);
+    raft_uv_tcp_init(&f->transport, f->loop);
     rv = f->transport.init(&f->transport, 1, "127.0.0.1:9000");
     munit_assert_int(rv, ==, 0);
     f->closed = false;
@@ -92,7 +92,7 @@ static void connect_cb(struct raft_uv_connect *req,
         for (i = 0; i < 2; i++) {                \
             if (f->invoked == 1)                 \
                 break;                           \
-            uv_run(&f->loop, UV_RUN_NOWAIT);     \
+            uv_run(f->loop, UV_RUN_NOWAIT);     \
         }                                        \
         munit_assert_int(f->invoked, ==, 1);     \
         munit_assert_int(f->status, ==, STATUS); \
@@ -217,7 +217,7 @@ TEST_CASE(close, handshake, NULL)
     struct fixture *f = data;
     (void)params;
     CONNECT(0);
-    uv_run(&f->loop, UV_RUN_NOWAIT);
+    uv_run(f->loop, UV_RUN_NOWAIT);
     CLOSE;
     WAIT_CONNECT_CB(RAFT_CANCELED);
     return MUNIT_OK;

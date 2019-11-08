@@ -40,9 +40,9 @@
         SETUP_TCP;                                                       \
         SETUP_LOOP;                                                      \
         SETUP_LOGGER;                                                    \
-        rv_ = raft_uv_tcp_init(&f->transport, &f->loop);                 \
+        rv_ = raft_uv_tcp_init(&f->transport, f->loop);                 \
         munit_assert_int(rv_, ==, 0);                                    \
-        rv_ = raft_uv_init(&f->io, &f->loop, f->dir, &f->transport);     \
+        rv_ = raft_uv_init(&f->io, f->loop, f->dir, &f->transport);     \
         munit_assert_int(rv_, ==, 0);                                    \
         f->io.data = f;                                                  \
         f->uv = f->io.impl;                                              \

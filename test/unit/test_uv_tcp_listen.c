@@ -58,7 +58,7 @@ static void *setup(const MunitParameter params[], void *user_data)
     test_heap_setup(params, &f->heap);
     test_tcp_setup(params, &f->tcp);
     SETUP_LOOP;
-    raft_uv_tcp_init(&f->transport, &f->loop);
+    raft_uv_tcp_init(&f->transport, f->loop);
     rv = f->transport.init(&f->transport, 1, "127.0.0.1:9000");
     munit_assert_int(rv, ==, 0);
     f->closed = false;
@@ -234,9 +234,9 @@ TEST_CASE(error, oom, listen_error_oom_params)
     test_heap_fault_enable(&f->heap);
 
     /* Run as much as possible. */
-    uv_run(&f->loop, UV_RUN_NOWAIT);
-    uv_run(&f->loop, UV_RUN_NOWAIT);
-    uv_run(&f->loop, UV_RUN_NOWAIT);
+    uv_run(f->loop, UV_RUN_NOWAIT);
+    uv_run(f->loop, UV_RUN_NOWAIT);
+    uv_run(f->loop, UV_RUN_NOWAIT);
 
     return MUNIT_OK;
 }

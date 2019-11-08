@@ -141,7 +141,7 @@ TEST_CASE(init, dir_too_long, NULL)
     memset(dir, 'a', sizeof dir - 1);
     dir[sizeof dir - 1] = 0;
 
-    rv = raft_uv_init(&io, &f->loop, dir, &transport);
+    rv = raft_uv_init(&io, f->loop, dir, &transport);
     munit_assert_int(rv, ==, RAFT_NAMETOOLONG);
 
     return MUNIT_OK;

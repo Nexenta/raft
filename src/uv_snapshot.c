@@ -132,7 +132,7 @@ static int loadMeta(struct uv *uv,
     unsigned format;
     unsigned crc1;
     unsigned crc2;
-    int fd;
+    uvFd fd;
     char errmsg[2048];
     int rv;
 
@@ -203,7 +203,7 @@ static int loadMeta(struct uv *uv,
     }
 
     raft_free(buf.base);
-    close(fd);
+    uvCloseFile(fd);
 
     return 0;
 
@@ -211,7 +211,7 @@ err_after_buf_malloc:
     raft_free(buf.base);
 
 err_after_open:
-    close(fd);
+    uvCloseFile(fd);
 
 err:
     assert(rv != 0);
@@ -227,7 +227,7 @@ static int loadData(struct uv *uv,
     uvFilename filename;
     struct raft_buffer buf;
     char errmsg[2048];
-    int fd;
+    uvFd fd;
     int rv;
 
     filenameOf(info, filename);
@@ -268,7 +268,7 @@ static int loadData(struct uv *uv,
 
     snapshot->bufs[0] = buf;
 
-    close(fd);
+    uvCloseFile(fd);
 
     return 0;
 
@@ -276,7 +276,7 @@ err_after_buf_alloc:
     raft_free(buf.base);
 
 err_after_open:
-    close(fd);
+    uvCloseFile(fd);
 
 err:
     assert(rv != 0);

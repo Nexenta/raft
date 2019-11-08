@@ -19,6 +19,10 @@ AS_IF([test "x$enable_uv" != "xno"],
 AS_IF([test "x$enable_uv" = "xyes" -a "x$have_uv" = "xno"], [AC_MSG_ERROR([libuv required but not found])], [])
 AM_CONDITIONAL(UV_ENABLED, test "x$have_uv" = "xyes")
 
+# Whether to enable debugging code.
+AC_ARG_ENABLE(ccowfsio, AS_HELP_STRING([--enable-ccowfsio], [enable use of ccowfsio for file ops [default=no]]))
+AM_CONDITIONAL(UV_CCOWFSIO_ENABLED, test "x$enable_ccowfsio" = "xyes")
+
 # The fake I/O implementation and associated fixture is built by default, unless
 # explicitely disabled.
 AC_ARG_ENABLE(fixture, AS_HELP_STRING([--disable-fixture], [do not build the raft_fixture test helper]))
@@ -69,7 +73,7 @@ AX_CHECK_COMPILE_FLAG([-Wpedantic], [AM_CFLAGS="$AM_CFLAGS -Wpedantic"])
 AX_CHECK_COMPILE_FLAG([-Wall], [AM_CFLAGS="$AM_CFLAGS -Wall"])
 AX_CHECK_COMPILE_FLAG([-Wimplicit-fallthrough=5], [AM_CFLAGS="$AM_CFLAGS -Wimplicit-fallthrough=5"])
 AX_CHECK_COMPILE_FLAG([-Wcast-align], [AM_CFLAGS="$AM_CFLAGS -Wcast-align"])
-AX_CHECK_COMPILE_FLAG([-Wstrict-prototypes], [AM_CFLAGS="$AM_CFLAGS -Wstrict-prototypes"])
+#AX_CHECK_COMPILE_FLAG([-Wstrict-prototypes], [AM_CFLAGS="$AM_CFLAGS -Wstrict-prototypes"])
 AX_CHECK_COMPILE_FLAG([-fno-strict-aliasing], [AM_CFLAGS="$AM_CFLAGS -fno-strict-aliasing"])
 AX_CHECK_COMPILE_FLAG([-fstack-clash-protection], [AM_CFLAGS="$AM_CFLAGS -fstack-clash-protection"])
 AX_CHECK_COMPILE_FLAG([-fstack-protector-strong], [AM_CFLAGS="$AM_CFLAGS -fstack-protector-strong"])
@@ -79,7 +83,7 @@ AX_CHECK_COMPILE_FLAG([--mcet -fcf-protection], [AM_CFLAGS="$AM_CFLAGS --mcet -f
 AX_CHECK_COMPILE_FLAG([-Werror=implicit-function-declaration], [AM_CFLAGS="$AM_CFLAGS -Werror=implicit-function-declaration"])
 AX_CHECK_COMPILE_FLAG([-Wlogical-op], [AM_CFLAGS="$AM_CFLAGS -Wlogical-op"])
 AX_CHECK_COMPILE_FLAG([-Wmissing-include-dirs], [AM_CFLAGS="$AM_CFLAGS -Wmissing-include-dirs"])
-AX_CHECK_COMPILE_FLAG([-Wold-style-definition], [AM_CFLAGS="$AM_CFLAGS -Wold-style-definition"])
+#AX_CHECK_COMPILE_FLAG([-Wold-style-definition], [AM_CFLAGS="$AM_CFLAGS -Wold-style-definition"])
 AX_CHECK_COMPILE_FLAG([-Winit-self], [AM_CFLAGS="$AM_CFLAGS -Winit-self"])
 AX_CHECK_COMPILE_FLAG([-Wfloat-equal], [AM_CFLAGS="$AM_CFLAGS -Wfloat-equal"])
 AX_CHECK_COMPILE_FLAG([-Wsuggest-attribute=noreturn], [AM_CFLAGS="$AM_CFLAGS -Wsuggest-attribute=noreturn"])

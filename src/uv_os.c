@@ -23,6 +23,211 @@ void uvJoin(const uvDir dir, const uvFilename filename, uvPath path)
     strcat(path, filename);
 }
 
+#if UV_CCOWFSIO_ENABLED
+#include "uv_ccowfsio_file.h"
+int uvEnsureDir(const uvDir dir, char *errmsg)
+{
+    char dpath[1024];
+    strcpy(dpath, dir);
+    char *subdir = NULL;
+    char *p = strrchr(dpath, '/');
+    if (p) {
+        *p = 0;
+        subdir = p+1;
+    }
+    inode_t di;
+    ci_t *ci = findFSExportByDir((char*)dpath, &di);
+    if (!ci) {
+        uvErrMsgPrintf(errmsg, "mkdir: Permission denied");
+        return 1;
+    }
+    if (di == 0) {
+        uvErrMsgPrintf(errmsg, "stat: Permission denied");
+        return 1;
+    }
+    if (subdir) {
+        int err = ccow_fsio_mkdir(ci, di, subdir, DEFAULT_DIR_PERM, 0, 0, NULL);
+	if (err && err != EEXIST) {
+            uvErrMsgPrintf(errmsg, "Not a directory");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int uvSyncDir(const uvDir dir, char *errmsg)
+{
+    return 0;
+}
+
+int uvScanDir(const uvDir dir,
+              struct dirent ***entries,
+              int *n_entries,
+              char *errmsg)
+{
+    return 0;
+}
+
+static void skip_free(void *ptr) {}
+
+int uvOpenFile(const uvDir dir,
+               const uvFilename filename,
+               int flags,
+               uvFd *fd,
+               char *errmsg)
+{
+    int err;
+    struct uvFile *f = raft_calloc(1, sizeof(struct uvFile));
+    if (!f)
+        return UV__ERROR;
+    f->ci = findFSExportByDir((char*)dir, &f->subdir_inode);
+    if (!f->ci) {
+        uvErrMsgPrintf(errmsg, "open: Permission denied");
+        raft_free(f);
+        return UV__ERROR;
+    }
+    if (f->subdir_inode == 0) {
+        uvErrMsgPrintf(errmsg, "open: Permission denied");
+        raft_free(f);
+        return UV__NOENT;
+    }
+
+    if (flags & O_CREAT) {
+        err = ccow_fsio_touch(f->ci, f->subdir_inode, (char*)filename,
+            0600, 0, 0, &f->inode);
+        if (err && err != EEXIST) {
+            uvErrMsgPrintf(errmsg, "touch err %d", err);
+            raft_free(f);
+            return UV__ERROR;
+        }
+    } else {
+        uvPath path;
+        uvJoin(dir, filename, path);
+        err = ccow_fsio_find(f->ci, path, &f->inode);
+        if (err) {
+            if (err == ENOENT) {
+                uvErrMsgPrintf(errmsg, "open: File not found");
+                raft_free(f);
+                return UV__NOENT;
+            }
+            uvErrMsgPrintf(errmsg, "open: err %d", err);
+            raft_free(f);
+            return UV__ERROR;
+        }
+    }
+
+    err = ccow_fsio_openi(f->ci, f->inode, &f->file, flags);
+    if (err) {
+        uvErrMsgPrintf(errmsg, "openi err %d", err);
+        raft_free(f);
+        return UV__ERROR;
+    }
+
+    ccow_fsio_write_free_set(f->file, skip_free);
+
+    *fd = f;
+    return 0;
+}
+
+int uvCloseFile(uvFd fd)
+{
+    struct uvFile *f = fd;
+    int err = ccow_fsio_close(f->file);
+    raft_free(f);
+    return err ? UV__ERROR : 0;
+}
+
+int uvStatFile(const uvDir dir,
+               const uvFilename filename,
+               struct stat *sb,
+               char *errmsg)
+{
+    return 0;
+}
+
+int uvUnlinkFile(const char *dir, const char *filename, char *errmsg)
+{
+    inode_t di;
+    ci_t *ci = findFSExportByDir((char*)dir, &di);
+    if (!ci || di == 0)
+        return UV__ERROR;
+    return ccow_fsio_delete(ci, di, (char*)filename);
+}
+
+int uvFtruncate(uvFd fd, off_t length)
+{
+	return 0;
+}
+
+int uvFsync(uvFd fd)
+{
+    struct uvFile *f = fd;
+    int err = ccow_fsio_flush(f->file);
+    return err ? UV__ERROR : 0;
+}
+
+int uvRenameFile(const uvDir dir,
+                 const uvFilename filename1,
+                 const uvFilename filename2,
+                 char *errmsg)
+{
+    inode_t di;
+    ci_t *ci = findFSExportByDir((char*)dir, &di);
+    if (!ci || di == 0)
+        return UV__ERROR;
+    int err = ccow_fsio_move(ci, di, (char *)filename1, di, (char *)filename2);
+    return err ? UV__ERROR : 0;
+}
+
+int uvReadFully(const uvFd fd, void *buf, const size_t n, char *errmsg)
+{
+    return 0;
+}
+
+int uvWriteFully(const uvFd fd, void *buf, const size_t n, char *errmsg)
+{
+    return 0;
+}
+
+off_t uvLseek(uvFd fd, off_t offset, int whence)
+{
+    struct uvFile *f = fd;
+    if (whence == SEEK_SET) {
+        f->offset = offset;
+        return offset;
+    } else if (whence == SEEK_CUR) {
+        f->offset += offset;
+        return f->offset;
+    } else if (whence == SEEK_END) {
+	struct stat stat;
+	int err = ccow_fsio_get_file_stat(f->ci, f->inode, &stat);
+    } else
+        assert(0);
+    return 0;
+}
+
+ssize_t uvWritev(uvFd fd, const struct iovec *iov, int iovcnt)
+{
+    int err;
+    size_t nb_written, io_amount = 0;
+    struct uvFile *f = fd;
+    for (int i = 0; i < iovcnt; i++) {
+        err = ccow_fsio_write(f->file, f->offset,
+            iov[i].iov_len, iov[i].iov_base, &nb_written);
+        if (err) {
+            return UV__ERROR;
+        }
+
+        if (nb_written == 0) {
+            break;
+        }
+
+        io_amount += nb_written;
+        f->offset += nb_written;
+    }
+    return io_amount;
+}
+#else
 int uvEnsureDir(const uvDir dir, char *errmsg)
 {
     struct stat sb;
@@ -88,7 +293,7 @@ int uvScanDir(const uvDir dir,
 int uvOpenFile(const uvDir dir,
                const uvFilename filename,
                int flags,
-               int *fd,
+               uvFd *fd,
                char *errmsg)
 {
     uvPath path;
@@ -99,6 +304,11 @@ int uvOpenFile(const uvDir dir,
         return errno == ENOENT ? UV__NOENT : UV__ERROR;
     }
     return 0;
+}
+
+int uvCloseFile(uvFd fd)
+{
+    return close(fd);
 }
 
 int uvStatFile(const uvDir dir,
@@ -117,53 +327,6 @@ int uvStatFile(const uvDir dir,
     return 0;
 }
 
-int uvMakeFile(const uvDir dir,
-               const uvFilename filename,
-               struct raft_buffer *bufs,
-               unsigned n_bufs,
-               char *errmsg)
-{
-    int flags = O_WRONLY | O_CREAT | O_EXCL;
-    int fd;
-    int rv;
-    size_t size;
-    unsigned i;
-    size = 0;
-    for (i = 0; i < n_bufs; i++) {
-        size += bufs[i].len;
-    }
-    rv = uvOpenFile(dir, filename, flags, &fd, errmsg);
-    if (rv != 0) {
-        return rv;
-    }
-    rv = writev(fd, (const struct iovec *)bufs, n_bufs);
-    if (rv != (int)(size)) {
-        if (rv == -1) {
-            uvErrMsgSys(errmsg, writev, errno);
-        } else {
-            assert(rv >= 0);
-            uvErrMsgPrintf(errmsg, "short write: %d only bytes written", rv);
-        }
-        goto err_after_file_open;
-    }
-    rv = fsync(fd);
-    if (rv == -1) {
-        uvErrMsgSys(errmsg, fsync, errno);
-        goto err_after_file_open;
-    }
-    rv = close(fd);
-    if (rv == -1) {
-        uvErrMsgSys(errmsg, close, errno);
-        goto err;
-    }
-    return 0;
-
-err_after_file_open:
-    close(fd);
-err:
-    return UV__ERROR;
-}
-
 int uvUnlinkFile(const char *dir, const char *filename, char *errmsg)
 {
     uvPath path;
@@ -177,42 +340,14 @@ int uvUnlinkFile(const char *dir, const char *filename, char *errmsg)
     return 0;
 }
 
-void uvTryUnlinkFile(const char *dir, const char *filename)
+int uvFtruncate(uvFd fd, off_t length)
 {
-    uvErrMsg errmsg;
-    uvUnlinkFile(dir, filename, errmsg);
+	return ftruncate(fd, length);
 }
 
-int uvTruncateFile(const uvDir dir,
-                   const uvFilename filename,
-                   size_t offset,
-                   char *errmsg)
+int uvFsync(uvFd fd)
 {
-    uvPath path;
-    int fd;
-    int rv;
-    uvJoin(dir, filename, path);
-    rv = uvOpenFile(dir, filename, O_RDWR, &fd, errmsg);
-    if (rv != 0) {
-        goto err;
-    }
-    rv = ftruncate(fd, offset);
-    if (rv == -1) {
-        uvErrMsgSys(errmsg, ftruncate, errno);
-        goto err_after_open;
-    }
-    rv = fsync(fd);
-    if (rv == -1) {
-        uvErrMsgSys(errmsg, fsync, errno);
-        goto err_after_open;
-    }
-    close(fd);
-    return 0;
-
-err_after_open:
-    close(fd);
-err:
-    return UV__ERROR;
+	return fsync(fd);
 }
 
 int uvRenameFile(const uvDir dir,
@@ -238,22 +373,7 @@ int uvRenameFile(const uvDir dir,
     return 0;
 }
 
-int uvIsEmptyFile(const uvDir dir,
-                  const uvFilename filename,
-                  bool *empty,
-                  char *errmsg)
-{
-    struct stat sb;
-    int rv;
-    rv = uvStatFile(dir, filename, &sb, errmsg);
-    if (rv != 0) {
-        return rv;
-    }
-    *empty = sb.st_size == 0 ? true : false;
-    return 0;
-}
-
-int uvReadFully(const int fd, void *buf, const size_t n, char *errmsg)
+int uvReadFully(const uvFd fd, void *buf, const size_t n, char *errmsg)
 {
     int rv;
     rv = read(fd, buf, n);
@@ -269,7 +389,7 @@ int uvReadFully(const int fd, void *buf, const size_t n, char *errmsg)
     return 0;
 }
 
-int uvWriteFully(const int fd, void *buf, const size_t n, char *errmsg)
+int uvWriteFully(const uvFd fd, void *buf, const size_t n, char *errmsg)
 {
     int rv;
     rv = write(fd, buf, n);
@@ -285,7 +405,112 @@ int uvWriteFully(const int fd, void *buf, const size_t n, char *errmsg)
     return 0;
 }
 
-int uvIsFilledWithTrailingZeros(const int fd, bool *flag, char *errmsg)
+off_t uvLseek(uvFd fd, off_t offset, int whence)
+{
+	return lseek(fd, offset, whence);
+}
+
+ssize_t uvWritev(uvFd fd, const struct iovec *iov, int iovcnt)
+{
+	return writev(fd, iov, iovcnt);
+}
+#endif // UV_CCOWFSIO_ENABLED
+
+int uvMakeFile(const uvDir dir,
+               const uvFilename filename,
+               struct raft_buffer *bufs,
+               unsigned n_bufs,
+               char *errmsg)
+{
+    int flags = O_WRONLY | O_CREAT | O_EXCL;
+    uvFd fd;
+    int rv;
+    size_t size;
+    unsigned i;
+    size = 0;
+    for (i = 0; i < n_bufs; i++) {
+        size += bufs[i].len;
+    }
+    rv = uvOpenFile(dir, filename, flags, &fd, errmsg);
+    if (rv != 0) {
+        return rv;
+    }
+    rv = uvWritev(fd, (const struct iovec *)bufs, n_bufs);
+    if (rv != (int)(size)) {
+        if (rv == -1) {
+            uvErrMsgSys(errmsg, writev, errno);
+        } else {
+            assert(rv >= 0);
+            uvErrMsgPrintf(errmsg, "short write: %d only bytes written", rv);
+        }
+        goto err_after_file_open;
+    }
+    rv = uvFsync(fd);
+    if (rv == -1) {
+        uvErrMsgSys(errmsg, fsync, errno);
+        goto err_after_file_open;
+    }
+    rv = uvCloseFile(fd);
+    if (rv == -1) {
+        uvErrMsgSys(errmsg, close, errno);
+        goto err;
+    }
+    return 0;
+
+err_after_file_open:
+    uvCloseFile(fd);
+err:
+    return UV__ERROR;
+}
+
+int uvTruncateFile(const uvDir dir,
+                   const uvFilename filename,
+                   size_t offset,
+                   char *errmsg)
+{
+    uvPath path;
+    uvFd fd;
+    int rv;
+    uvJoin(dir, filename, path);
+    rv = uvOpenFile(dir, filename, O_RDWR, &fd, errmsg);
+    if (rv != 0) {
+        goto err;
+    }
+    rv = uvFtruncate(fd, offset);
+    if (rv == -1) {
+        uvErrMsgSys(errmsg, ftruncate, errno);
+        goto err_after_open;
+    }
+    rv = uvFsync(fd);
+    if (rv == -1) {
+        uvErrMsgSys(errmsg, fsync, errno);
+        goto err_after_open;
+    }
+    uvCloseFile(fd);
+    return 0;
+
+err_after_open:
+    uvCloseFile(fd);
+err:
+    return UV__ERROR;
+}
+
+int uvIsEmptyFile(const uvDir dir,
+                  const uvFilename filename,
+                  bool *empty,
+                  char *errmsg)
+{
+    struct stat sb;
+    int rv;
+    rv = uvStatFile(dir, filename, &sb, errmsg);
+    if (rv != 0) {
+        return rv;
+    }
+    *empty = sb.st_size == 0 ? true : false;
+    return 0;
+}
+
+int uvIsFilledWithTrailingZeros(const uvFd fd, bool *flag, char *errmsg)
 {
     off_t size;
     off_t offset;
@@ -294,10 +519,10 @@ int uvIsFilledWithTrailingZeros(const int fd, bool *flag, char *errmsg)
     int rv;
 
     /* Save the current offset. */
-    offset = lseek(fd, 0, SEEK_CUR);
+    offset = uvLseek(fd, 0, SEEK_CUR);
 
     /* Figure the size of the rest of the file. */
-    size = lseek(fd, 0, SEEK_END);
+    size = uvLseek(fd, 0, SEEK_END);
     if (size == -1) {
         uvErrMsgSys(errmsg, lseek, errno);
         return UV__ERROR;
@@ -305,7 +530,7 @@ int uvIsFilledWithTrailingZeros(const int fd, bool *flag, char *errmsg)
     size -= offset;
 
     /* Reposition the file descriptor offset to the original offset. */
-    offset = lseek(fd, offset, SEEK_SET);
+    offset = uvLseek(fd, offset, SEEK_SET);
     if (offset == -1) {
         uvErrMsgSys(errmsg, lseek, errno);
         return UV__ERROR;
@@ -337,14 +562,20 @@ done:
     return 0;
 }
 
-bool uvIsAtEof(const int fd)
+bool uvIsAtEof(const uvFd fd)
 {
     off_t offset;
     off_t size;
-    offset = lseek(fd, 0, SEEK_CUR); /* Get the current offset */
-    size = lseek(fd, 0, SEEK_END);   /* Get file size */
-    lseek(fd, offset, SEEK_SET);     /* Restore current offset */
+    offset = uvLseek(fd, 0, SEEK_CUR); /* Get the current offset */
+    size = uvLseek(fd, 0, SEEK_END);   /* Get file size */
+    uvLseek(fd, offset, SEEK_SET);     /* Restore current offset */
     return offset == size;           /* Compare current offset and size */
+}
+
+void uvTryUnlinkFile(const char *dir, const char *filename)
+{
+    uvErrMsg errmsg;
+    uvUnlinkFile(dir, filename, errmsg);
 }
 
 /* Check if direct I/O is possible on the given fd. */
@@ -503,6 +734,11 @@ static int probeAsyncIO(int fd, size_t size, bool *ok, char *errmsg)
 
     return 0;
 }
+
+off_t uvLseek(uvFd fd, off_t offset, int whence)
+{
+	return lseek(fd, offset, whence);
+}
 #endif /* RWF_NOWAIT */
 
 int uvProbeIoCapabilities(const uvDir dir,
@@ -514,6 +750,12 @@ int uvProbeIoCapabilities(const uvDir dir,
     uvPath path;         /* Full path of the probe file */
     int fd;              /* File descriptor of the probe file */
     int rv;
+
+    if (dir[0] != '/') {
+        *async = false;
+        *direct = false;
+        return 0;
+    }
 
     /* Create a temporary probe file. */
     strcpy(filename, ".probe-XXXXXX");

@@ -12,32 +12,17 @@
 /* Max n. of loop iterations ran by a single function call */
 #define LOOP_MAX_RUN 10
 
-#define FIXTURE_LOOP struct uv_loop_s loop
+#define FIXTURE_LOOP struct uv_loop_s *loop
 
 #define SETUP_LOOP                                                          \
     {                                                                       \
-        int rv__;                                                           \
-        rv__ = uv_replace_allocator(raft_malloc, raft_realloc, raft_calloc, \
-                                    raft_free);                             \
-        munit_assert_int(rv__, ==, 0);                                      \
-        rv__ = uv_loop_init(&f->loop);                                      \
-        munit_assert_int(rv__, ==, 0);                                      \
+        f->loop = uv_loop_new();                                            \
     }
 
 #define TEAR_DOWN_LOOP                                                     \
     {                                                                      \
-        int rv_;                                                           \
-        int alive_ = uv_loop_alive(&f->loop);                              \
-        if (alive_ != 0) {                                                 \
-            LOOP_STOP;                                                     \
-        }                                                                  \
-        rv_ = uv_loop_close(&f->loop);                                     \
-        if (rv_ != 0) {                                                    \
-            uv_walk(&f->loop, test_loop_walk_cb, NULL);                    \
-            munit_errorf("uv_loop_close: %s (%d)", uv_strerror(rv_), rv_); \
-        }                                                                  \
-        rv_ = uv_replace_allocator(malloc, realloc, calloc, free);         \
-        munit_assert_int(rv_, ==, 0);                                      \
+        LOOP_STOP;                                                         \
+        uv_loop_delete(f->loop);                                           \
     }
 
 /* Run the loop until there are no pending active handles or the given amount of
@@ -48,9 +33,9 @@
         int rv__;                                                         \
         munit_assert_int(N, >, 0);                                        \
         for (i__ = 0; i__ < N; i__++) {                                   \
-            rv__ = uv_run(&f->loop, UV_RUN_ONCE);                         \
+            rv__ = uv_run(f->loop, UV_RUN_ONCE);                          \
             if (rv__ < 0) {                                               \
-                munit_errorf("uv_run: %s (%d)", uv_strerror(rv__), rv__); \
+                munit_errorf("uv_run: %s (%d)", uv_strerror(uv_last_error(f->loop)), rv__); \
             }                                                             \
             if (rv__ == 0) {                                              \
                 break;                                                    \
@@ -70,9 +55,9 @@
             if (F(DATA)) {                                                   \
                 break;                                                       \
             }                                                                \
-            rv_ = uv_run(&f->loop, UV_RUN_ONCE);                             \
+            rv_ = uv_run(f->loop, UV_RUN_ONCE);                             \
             if (rv_ < 0) {                                                   \
-                munit_errorf("uv_run: %s (%d)", uv_strerror(rv_), rv_);      \
+                munit_errorf("uv_run: %s (%d)", uv_strerror(uv_last_error(f->loop)), rv_);      \
             }                                                                \
             if (rv_ == 0) {                                                  \
                 if (F(DATA)) {                                               \
@@ -95,12 +80,7 @@
  * This is meant to be used in tear down functions. */
 #define LOOP_STOP                                                 \
     {                                                             \
-        int alive__;                                              \
         LOOP_RUN(LOOP_MAX_RUN);                                   \
-        alive__ = uv_loop_alive(&f->loop);                        \
-        if (alive__ != 0) {                                       \
-            munit_error("loop has still pending active handles"); \
-        }                                                         \
     }
 
 void test_loop_walk_cb(uv_handle_t *handle, void *arg);

@@ -5,7 +5,11 @@
 
 #include "../include/raft.h"
 
+#if UV_CCOWFSIO_ENABLED
+#include "uv_ccowfsio_file.h"
+#else
 #include "uv_file.h"
+#endif
 #include "uv_os.h"
 
 /* 8 Megabytes */

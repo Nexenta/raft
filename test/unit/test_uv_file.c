@@ -41,7 +41,7 @@ static void *setupFile(const MunitParameter params[],
     SETUP_LOOP;
     rv = uvProbeIoCapabilities(f->dir, &f->direct_io, &f->async_io, errmsg);
     munit_assert_int(rv, ==, 0);
-    rv = uvFileInit(&f->file, &f->loop, f->direct_io != 0, f->async_io, errmsg);
+    rv = uvFileInit(&f->file, f->loop, f->direct_io != 0, f->async_io, errmsg);
     munit_assert_int(rv, ==, 0);
     f->block_size = f->direct_io != 0 ? f->direct_io : 4096;
     return f;
@@ -214,9 +214,10 @@ TEST(uvFileCreate, fileAlreadyExists, setupFile, tearDownFile, 0, NULL)
 }
 
 /* The kernel has ran out of available AIO events. */
-TEST(uvFileCreate, noResources, setupFile, tearDownFile, 0, NULL)
+TEST(uvFileCreate, noResources, setupFile, tearDownFile, 0, dir_aio_params)
 {
     struct file *f = data;
+    SKIP_IF_NO_FIXTURE;
     aio_context_t ctx = 0;
     test_aio_fill(&ctx, 0);
     CREATE_ERROR_("foo",     /* file name */
@@ -328,7 +329,7 @@ static void writeCbAssertFail(struct uvFileWrite *req,
  * OFFSET is the offset at which to write the buffers. */
 #define WRITE_(N_BUFS, CONTENT, OFFSET)                           \
     {                                                             \
-        struct uv_buf_t *bufs_;                                   \
+        uv_buf_t *bufs_;                                          \
         struct uvFileWrite req_;                                  \
         bool done_ = false;                                       \
         uvErrMsg errmsg_;                                         \
@@ -337,7 +338,7 @@ static void writeCbAssertFail(struct uvFileWrite *req,
         MAKE_BUFS(bufs_, N_BUFS, CONTENT);                        \
         req_.data = &done_;                                       \
         rv_ = uvFileWrite(&f->file, &req_, bufs_, N_BUFS, OFFSET, \
-                          writeCbAssertOk, errmsg_);              \
+                          writeCbAssertOk, errmsg_); rv_=rv_;              \
         for (i_ = 0; i_ < 2; i_++) {                              \
             LOOP_RUN(1);                                          \
             if (done_) {                                          \
@@ -352,7 +353,7 @@ static void writeCbAssertFail(struct uvFileWrite *req,
  * fail with the given code and message. */
 #define WRITE_FAILURE(N_BUFS, CONTENT, OFFSET, STATUS, ERRMSG)    \
     {                                                             \
-        struct uv_buf_t *bufs_;                                   \
+        uv_buf_t *bufs_;                                          \
         struct uvFileWrite req_;                                  \
         struct result result_ = {                                 \
             .status = STATUS, .errmsg = ERRMSG, .done = false};   \
@@ -489,7 +490,7 @@ TEST(uvFileWrite, noResources, setupFile, tearDownFile, 0, dir_no_aio_params)
 TEST(uvFileWrite, cancel, setupFile, tearDownFile, 0, dir_all_params)
 {
     struct file *f = data;
-    struct uv_buf_t *bufs;
+    uv_buf_t *bufs;
     struct uvFileWrite req;
     struct result result = {
         .status = UV__CANCELED, .errmsg = "canceled", .done = false};

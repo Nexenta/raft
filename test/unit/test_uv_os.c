@@ -122,7 +122,7 @@ TEST(uvSyncDir, noExists, NULL, NULL, 0, NULL)
 /* Open a file the fixture's tmpdir. */
 #define OPEN_FILE_ERROR(DIR, FILENAME, FLAGS, RV, ERRMSG)        \
     {                                                            \
-        int fd;                                                  \
+        uvFd fd;                                                 \
         uvErrMsg errmsg;                                         \
         int rv_ = uvOpenFile(DIR, FILENAME, FLAGS, &fd, errmsg); \
         munit_assert_int(rv_, ==, RV);                           \

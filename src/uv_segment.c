@@ -158,7 +158,7 @@ int uvSegmentKeepTrailing(struct uv *uv,
 static int openSegment(struct uv *uv,
                        const uvFilename filename,
                        const int flags,
-                       int *fd,
+                       uvFd *fd,
                        uint64_t *format)
 {
     char errmsg[2048];
@@ -171,7 +171,7 @@ static int openSegment(struct uv *uv,
     rv = uvReadFully(*fd, format, sizeof *format, errmsg);
     if (rv != 0) {
         uvErrorf(uv, "read %s: %s", filename, errmsg);
-        close(*fd);
+        uvCloseFile(*fd);
         return RAFT_IOERR;
     }
     *format = byteFlip64(*format);
@@ -182,7 +182,7 @@ static int openSegment(struct uv *uv,
  *
  * Set @last to #true if the loaded batch is the last one. */
 static int loadEntriesBatch(struct uv *uv,
-                            const int fd,
+                            const uvFd fd,
                             struct raft_entry **entries,
                             unsigned *n_entries,
                             bool *last)
@@ -200,7 +200,7 @@ static int loadEntriesBatch(struct uv *uv,
     int rv;
 
     /* Save the current offset, to provide more information when logging. */
-    offset = lseek(fd, 0, SEEK_CUR);
+    offset = uvLseek(fd, 0, SEEK_CUR);
 
     /* Read the preamble, consisting of the checksums for the batch header and
      * data buffers and the first 8 bytes of the header buffer, which contains
@@ -341,7 +341,7 @@ int uvSegmentLoadClosed(struct uv *uv,
                         size_t *n)
 {
     bool empty;                     /* Whether the file is empty */
-    int fd;                         /* Segment file descriptor */
+    uvFd fd;                         /* Segment file descriptor */
     uint64_t format;                /* Format version */
     bool last;                      /* Whether the last batch was reached */
     struct raft_entry *tmp_entries; /* Entries in current batch */
@@ -395,7 +395,7 @@ int uvSegmentLoadClosed(struct uv *uv,
     assert(i > 1);  /* At least one batch was loaded. */
     assert(*n > 0); /* At least one entry was loaded. */
 
-    close(fd);
+    uvCloseFile(fd);
 
     return 0;
 
@@ -404,7 +404,7 @@ err_after_batch_load:
     raft_free(tmp_entries);
 
 err_after_open:
-    close(fd);
+    uvCloseFile(fd);
 
 err:
     assert(rv != 0);
@@ -424,7 +424,7 @@ static int loadOpen(struct uv *uv,
     bool empty;                     /* Whether the segment file is empty */
     bool remove = false;            /* Whether to remove this segment */
     bool last = false;              /* Whether the last batch was reached */
-    int fd;                         /* Segment file descriptor */
+    uvFd fd;                         /* Segment file descriptor */
     uint64_t format;                /* Format version */
     size_t n_batches = 0;           /* Number of loaded batches */
     struct raft_entry *tmp_entries; /* Entries in current batch */
@@ -483,7 +483,7 @@ static int loadOpen(struct uv *uv,
     for (i = 1; !last; i++) {
         /* Save the current file descriptor offset, in case we need to truncate
          * the file to exclude this batch because it's incomplete. */
-        off_t offset = lseek(fd, 0, SEEK_CUR);
+        off_t offset = uvLseek(fd, 0, SEEK_CUR);
 
         if (offset == -1) {
             uvErrorf(uv, "offset %s: %s", info->filename, i, errmsg);
@@ -503,7 +503,7 @@ static int loadOpen(struct uv *uv,
              * rest of the file is filled with zeros. In that case we assume
              * that the server shutdown uncleanly and we just truncate this
              * incomplete data. */
-            lseek(fd, offset, SEEK_SET);
+            uvLseek(fd, offset, SEEK_SET);
 
             rv2 = uvIsFilledWithTrailingZeros(fd, &all_zeros, errmsg);
             if (rv2 != 0) {
@@ -522,14 +522,14 @@ static int loadOpen(struct uv *uv,
                     "entries",
                     info->filename, offset);
 
-            rv = ftruncate(fd, offset);
+            rv = uvFtruncate(fd, offset);
             if (rv == -1) {
                 uvErrorf(uv, "ftruncate %s: %s", info->filename,
                          strerror(errno));
                 rv = RAFT_IOERR;
                 goto err_after_open;
             }
-            rv = fsync(fd);
+            rv = uvFsync(fd);
             if (rv == -1) {
                 uvErrorf(uv, "fsync %s: %s", info->filename, strerror(errno));
                 rv = RAFT_IOERR;
@@ -550,7 +550,7 @@ static int loadOpen(struct uv *uv,
         *next_index += tmp_n_entries;
     }
 
-    rv = close(fd);
+    rv = uvCloseFile(fd);
     assert(rv == 0);
 
     if (n_batches == 0) {
@@ -597,7 +597,7 @@ err_after_batch_load:
     raft_free(tmp_entries);
 
 err_after_open:
-    close(fd);
+    uvCloseFile(fd);
 
 err:
     assert(rv != 0);
@@ -857,7 +857,7 @@ err:
 
 /* Write the first closed segment */
 static int writeFirstClosed(struct uv *uv,
-                            const int fd,
+                            const uvFd fd,
                             const struct raft_buffer *conf)
 {
     struct uvSegmentBuffer buf;
@@ -899,7 +899,7 @@ static int writeFirstClosed(struct uv *uv,
         return RAFT_IOERR;
     }
 
-    rv = fsync(fd);
+    rv = uvFsync(fd);
     if (rv == -1) {
         uvErrorf(uv, "fsync segment 1: %s", errmsg);
         return RAFT_IOERR;
@@ -914,7 +914,7 @@ int uvSegmentCreateFirstClosed(struct uv *uv,
     struct raft_buffer buf;
     uvFilename filename;
     char errmsg[2048];
-    int fd;
+    uvFd fd;
     int rv;
 
     /* Render the path */
@@ -941,7 +941,7 @@ int uvSegmentCreateFirstClosed(struct uv *uv,
         goto err_after_file_open;
     }
 
-    close(fd);
+    uvCloseFile(fd);
     raft_free(buf.base);
 
     rv = uvSyncDir(uv->dir, errmsg);
@@ -953,7 +953,7 @@ int uvSegmentCreateFirstClosed(struct uv *uv,
     return 0;
 
 err_after_file_open:
-    close(fd);
+    uvCloseFile(fd);
 err_after_configuration_encode:
     raft_free(buf.base);
 err:
@@ -970,7 +970,7 @@ int uvSegmentTruncate(struct uv *uv,
     struct uvSegmentBuffer buf;
     size_t n;
     size_t m;
-    int fd;
+    uvFd fd;
     char errmsg[2048];
     int rv;
 
@@ -1021,7 +1021,7 @@ int uvSegmentTruncate(struct uv *uv,
         goto out_after_open;
     }
 
-    rv = fsync(fd);
+    rv = uvFsync(fd);
     if (rv == -1) {
         uvErrorf(uv, "fsync %s: %s", filename, strerror(errno));
         rv = RAFT_IOERR;
@@ -1031,7 +1031,7 @@ int uvSegmentTruncate(struct uv *uv,
 out_after_buffer_init:
     uvSegmentBufferClose(&buf);
 out_after_open:
-    close(fd);
+    uvCloseFile(fd);
 out_after_load:
     entryBatchesDestroy(entries, n);
 out:

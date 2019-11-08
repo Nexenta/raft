@@ -101,7 +101,6 @@ raft_uv_SOURCES = \
   src/uv.c \
   src/uv_append.c \
   src/uv_encoding.c \
-  src/uv_file.c \
   src/uv_finalize.c \
   src/uv_ip.c \
   src/uv_list.c \
@@ -116,6 +115,14 @@ raft_uv_SOURCES = \
   src/uv_tcp_connect.c \
   src/uv_tcp_listen.c \
   src/uv_truncate.c
+
+if UV_CCOWFSIO_ENABLED
+raft_uv_SOURCES += src/uv_ccowfsio_file.c
+libraft_la_LDFLAGS += -lccowfsio
+AM_CFLAGS += -DUV_CCOWFSIO_ENABLED=1
+else
+libraft_la_SOURCES += src/uv_file.c
+endif
 
 libraft_la_SOURCES += $(raft_uv_SOURCES)
 libraft_la_LDFLAGS += $(UV_LIBS)
@@ -160,6 +167,10 @@ test_unit_uv_SOURCES += \
 test_unit_uv_LDADD = libtest.la
 test_unit_uv_LDFLAGS = $(UV_LIBS)
 
+if UV_CCOWFSIO_ENABLED
+test_unit_uv_LDFLAGS += -lccowfsio
+endif
+
 test_benchmark_uv_SOURCES = \
   src/heap.c \
   src/uv_os.c \
@@ -167,6 +178,10 @@ test_benchmark_uv_SOURCES = \
   test/benchmark/test_uv_disk.c
 test_benchmark_uv_LDADD = libtest.la
 test_benchmark_uv_LDFLAGS = $(UV_LIBS)
+
+if UV_CCOWFSIO_ENABLED
+test_benchmark_uv_LDFLAGS += -lccowfsio
+endif
 
 AM_CFLAGS += $(UV_CFLAGS)
 

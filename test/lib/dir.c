@@ -18,7 +18,7 @@
 
 #define TEST_DIR_TEMPLATE "./tmp/%s/raft-test-XXXXXX"
 
-char *test_dir_all[] = {"tmpfs", "ext4",
+char *test_dir_all[] = {"tmpfs", "ext4", "edgefs",
                         "btrfs",
                         "xfs",
                         "zfs",
@@ -90,9 +90,13 @@ void *setupDir(MUNIT_UNUSED const MunitParameter params[],
 {
     const char *fs = munit_parameters_get(params, TEST_DIR_FS);
     if (fs == NULL) {
+        if (getenv("RAFT_TMP_EDGEFS"))
+	    return getenv("RAFT_TMP_EDGEFS");
         return mkTempDir("/tmp");
     } else if (strcmp(fs, "tmpfs") == 0) {
         return setupTmpfsDir(params, user_data);
+    } else if (strcmp(fs, "edgefs") == 0) {
+        return getenv("RAFT_TMP_EDGEFS");
     } else if (strcmp(fs, "ext4") == 0) {
         return setupExt4Dir(params, user_data);
     } else if (strcmp(fs, "btrfs") == 0) {
@@ -136,6 +140,207 @@ void *setupXfsDir(MUNIT_UNUSED const MunitParameter params[],
     return mkTempDir(getenv("RAFT_TMP_XFS"));
 }
 
+char *test_dir_setup(const MunitParameter params[])
+{
+    return setupDir(params, NULL);
+}
+
+#if UV_CCOWFSIO_ENABLED
+
+#include "src/uv_ccowfsio_file.h"
+
+extern int
+ccow_fsio_find_export(char *cid, size_t cid_size, char *tid, size_t tid_size,
+    char *bid, size_t bid_size, ci_t ** out_ci);
+
+/* Wrapper around remove(), compatible with ntfw. */
+static int removeFn(const char *path,
+                    MUNIT_UNUSED const struct stat *sbuf,
+                    MUNIT_UNUSED int type,
+                    MUNIT_UNUSED struct FTW *ftwb)
+{
+    return remove(path);
+}
+
+static int
+recursive_delete(inode_t parent, fsio_dir_entry *dir_entry, uint64_t count, void *ptr)
+{
+	uint64_t i;
+	ci_t *ci = ptr;
+
+	for (i=0; i< count; i++) {
+		if (dir_entry[i].name[0] == '.' && (dir_entry[i].name[1] == '\0' ||
+			    (dir_entry[i].name[1] == '.' && dir_entry[i].name[2] == '\0')))
+			continue;
+
+		if (ccow_fsio_is_dir(ci, dir_entry[i].inode)) {
+			bool eof;
+			ccow_fsio_readdir_cb4(ci, dir_entry[i].inode, recursive_delete, 0, NULL, &eof);
+		}
+		if (dir_entry[i].inode != CCOW_FSIO_ROOT_INODE &&
+		    dir_entry[i].inode != CCOW_FSIO_LOST_FOUND_DIR_INODE) {
+			int err = ccow_fsio_delete(ci, parent, dir_entry[i].name);
+			munit_assert_int(err, ==, 0);
+		}
+	}
+
+	return (0);
+}
+
+void tearDownDir(void *data)
+{
+	inode_t di;
+	ci_t *ci = findFSExportByDir((char*)data, &di);
+	munit_assert_not_null(ci);
+
+	bool eof;
+	int err = ccow_fsio_readdir_cb4(ci, di, recursive_delete, 0, ci, &eof);
+	munit_assert_int(err, ==, 0);
+}
+
+void test_dir_tear_down(char *dir)
+{
+    tearDownDir(dir);
+}
+
+void test_dir_write_file(const char *dir,
+                         const char *filename,
+                         const void *buf,
+                         const size_t n)
+{
+	inode_t di, fi;
+	ci_t *ci = findFSExportByDir((char*)dir, &di);
+	munit_assert_not_null(ci);
+
+	int err;
+	err = ccow_fsio_touch(ci, di, (char*)filename, 0600, 0, 0, &fi);
+	if (err == EEXIST) err = 0;
+	munit_assert_int(err, ==, 0);
+
+	ccow_fsio_file_t *f;
+	err = ccow_fsio_openi(ci, fi, &f, O_RDWR);
+	if (err) {
+	}
+
+	char *b = malloc(n); memcpy(b, buf, n);
+	size_t write_amount = 0;
+	err = ccow_fsio_write(f, 0, n, (void *)b, &write_amount);
+	munit_assert_int(err, ==, 0);
+	munit_assert_int(write_amount, ==, n);
+
+	ccow_fsio_close(f);
+}
+
+void test_dir_write_file_with_zeros(const char *dir,
+                                    const char *filename,
+                                    const size_t n)
+{
+}
+
+void test_dir_append_file(const char *dir,
+                          const char *filename,
+                          const void *buf,
+                          const size_t n)
+{
+}
+
+void test_dir_overwrite_file(const char *dir,
+                             const char *filename,
+                             const void *buf,
+                             const size_t n,
+                             const off_t whence)
+{
+}
+
+void test_dir_overwrite_file_with_zeros(const char *dir,
+                                        const char *filename,
+                                        const size_t n,
+                                        const off_t whence)
+{
+}
+
+void test_dir_truncate_file(const char *dir,
+                            const char *filename,
+                            const size_t n)
+{
+}
+
+void test_dir_read_file(const char *dir,
+                        const char *filename,
+                        void *buf,
+                        const size_t n)
+{
+	int err;
+	inode_t di, fi;
+	ccow_fsio_file_t *f;
+	ci_t *ci = findFSExportByDir((char*)dir, &di);
+	munit_assert_not_null(ci);
+	err = ccow_fsio_lookup(ci, di, (char*)filename, &fi);
+	munit_assert(err == 0);
+	err = ccow_fsio_openi(ci, fi, &f, O_RDONLY);
+	munit_assert(err == 0);
+	size_t read_amount;
+	int eof;
+	err = ccow_fsio_read(f, 0, n, buf, &read_amount, &eof);
+	munit_assert(err == 0 && read_amount == n);
+	err = ccow_fsio_close(f);
+	munit_assert(err == 0);
+}
+
+bool test_dir_exists(const char *dir)
+{
+	char dpath[1024];
+	strcpy(dpath, dir);
+	char *subdir = NULL;
+	char *p = strrchr(dpath, '/');
+	if (p) {
+		*p = 0;
+		subdir = p+1;
+	}
+	inode_t di, fi;
+	ci_t *ci = findFSExportByDir((char*)dpath, &di);
+	munit_assert_not_null(ci);
+	munit_assert(di != 0);
+	if (!subdir)
+		return true;
+	int err = ccow_fsio_lookup(ci, di, (char*)subdir, &fi);
+	munit_assert(err == 0 || err == ENOENT);
+	return err == 0;
+}
+
+void test_dir_unexecutable(const char *dir)
+{
+}
+
+void test_dir_unreadable_file(const char *dir, const char *filename)
+{
+}
+
+bool test_dir_has_file(const char *dir, const char *filename)
+{
+	inode_t di, fi;
+	ci_t *ci = findFSExportByDir((char*)dir, &di);
+	munit_assert_not_null(ci);
+	int err = ccow_fsio_lookup(ci, di, (char*)filename, &fi);
+	munit_assert(err == 0 || err == ENOENT);
+	return err == 0;
+}
+
+void test_dir_fill(const char *dir, const size_t n)
+{
+}
+
+
+#else
+
+/* Join the given @dir and @filename into @path. */
+static void joinPath(const char *dir, const char *filename, char *path)
+{
+    strcpy(path, dir);
+    strcat(path, "/");
+    strcat(path, filename);
+}
+
 /* Wrapper around remove(), compatible with ntfw. */
 static int removeFn(const char *path,
                     MUNIT_UNUSED const struct stat *sbuf,
@@ -163,22 +368,9 @@ void tearDownDir(void *data)
     free(dir);
 }
 
-char *test_dir_setup(const MunitParameter params[])
-{
-    return setupDir(params, NULL);
-}
-
 void test_dir_tear_down(char *dir)
 {
     tearDownDir(dir);
-}
-
-/* Join the given @dir and @filename into @path. */
-static void joinPath(const char *dir, const char *filename, char *path)
-{
-    strcpy(path, dir);
-    strcat(path, "/");
-    strcat(path, filename);
 }
 
 void test_dir_write_file(const char *dir,
@@ -428,6 +620,8 @@ void test_dir_fill(const char *dir, const size_t n)
 
     close(fd);
 }
+
+#endif
 
 void test_aio_fill(aio_context_t *ctx, unsigned n)
 {

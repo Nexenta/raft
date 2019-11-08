@@ -33,6 +33,12 @@ typedef char uvFilename[UV__FILENAME_MAX_LEN];
 /* Fixed length string that can hold a directory path. */
 typedef char uvDir[UV__DIR_MAX_LEN];
 
+#if UV_CCOWFSIO_ENABLED
+typedef void* uvFd;
+#else
+typedef int uvFd;
+#endif
+
 /* Concatenate a directory and a file. */
 void uvJoin(const uvDir dir, const uvFilename filename, uvPath path);
 
@@ -52,8 +58,12 @@ int uvScanDir(const uvDir dir,
 int uvOpenFile(const uvDir dir,
                const uvFilename filename,
                int flags,
-               int *fd,
+               uvFd *fd,
                char *errmsg);
+
+ssize_t uvWritev(uvFd fd, const struct iovec *iov, int iovcnt);
+
+int uvCloseFile(uvFd fd);
 
 /* Stat a file in a directory. */
 int uvStatFile(const uvDir dir,
@@ -74,6 +84,10 @@ int uvUnlinkFile(const uvDir dir, const uvFilename filename, char *errmsg);
 /* Like uvUnlinkFile, but ignoring errors. */
 void uvTryUnlinkFile(const uvDir dir, const uvFilename filename);
 
+int uvFtruncate(uvFd fd, off_t length);
+
+int uvFsync(uvFd fd);
+
 /* Truncate a file in a directory. */
 int uvTruncateFile(const uvDir dir,
                    const uvFilename filename,
@@ -92,18 +106,20 @@ int uvIsEmptyFile(const uvDir dir,
                   bool *empty,
                   char *errmsg);
 
+off_t uvLseek(uvFd fd, off_t offset, int whence);
+
 /* Read exactly @n bytes from the given file descriptor. */
-int uvReadFully(int fd, void *buf, size_t n, char *errmsg);
+int uvReadFully(uvFd fd, void *buf, size_t n, char *errmsg);
 
 /* Write exactly @n bytes to the given file descriptor. */
-int uvWriteFully(int fd, void *buf, size_t n, char *errmsg);
+int uvWriteFully(uvFd fd, void *buf, size_t n, char *errmsg);
 
 /* Check if the content of the file associated with the given file descriptor
  * contains all zeros from the current offset onward. */
-int uvIsFilledWithTrailingZeros(int fd, bool *flag, char *errmsg);
+int uvIsFilledWithTrailingZeros(uvFd fd, bool *flag, char *errmsg);
 
 /* Check if the given file descriptor has reached the end of the file. */
-bool uvIsAtEof(int fd);
+bool uvIsAtEof(uvFd fd);
 
 /* Return information about the I/O capabilities of the underlying file
  * system.
