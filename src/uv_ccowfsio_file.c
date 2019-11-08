@@ -49,10 +49,14 @@ findFSExportByDir(char *dir, inode_t *subdir_inode)
 			return NULL;
 		}
 
-		char path[PATH_MAX];
-		snprintf(path, sizeof(path), "%s/etc/ccow/ccow.json", nedge_path());
+		char ccowpath[PATH_MAX];
+		snprintf(ccowpath, sizeof(ccowpath), "%s/etc/ccow/ccow.json",
+		    nedge_path());
 
-		err = ccow_fsio_create_export(ci, "cltest/test/test", path,
+		char exppath[PATH_MAX];
+		snprintf(exppath, sizeof(exppath), "%s/%s/%s", cid, tid, bid);
+
+		err = ccow_fsio_create_export(ci, exppath, ccowpath,
 		    4096, NULL, NULL);
 		if (err) {
 			ccow_fsio_ci_free(ci);
