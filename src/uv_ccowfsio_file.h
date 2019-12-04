@@ -22,6 +22,8 @@ struct uvFileWrite;
 
 ci_t * findFSExportByDir(char *dir, inode_t *subdir_inode);
 
+int uvCheckAccess(ci_t *ci, inode_t inode);
+
 /* Callback called after a create file request has been completed. */
 typedef void (*uvFileCreateCb)(struct uvFileCreate *req,
                                int status,

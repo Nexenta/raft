@@ -27,64 +27,179 @@ void uvJoin(const uvDir dir, const uvFilename filename, uvPath path)
 #include "uv_ccowfsio_file.h"
 int uvEnsureDir(const uvDir dir, char *errmsg)
 {
-    char dpath[1024];
+    char dpath[UV__PATH_MAX_LEN];
+    struct stat sb;
+    int err;
+
+    /* Check that the given path doesn't exceed our static buffer limit */
+    assert(strnlen(dir, UV__DIR_MAX_LEN + 1) <= UV__DIR_MAX_LEN);
+
+    /* Make sure that dir with ccow hierarchy does not exist */
+    err = stat(dir, &sb);
+    if (err == 0 && (sb.st_mode & S_IFMT) != S_IFDIR) {
+	    uvErrMsgPrintf(errmsg, "%s", strerror(ENOTDIR));
+	    return UV__ERROR;
+    }
+
+    /* If dir with ccow hierarchy exists, deny further op */
+    if (err == 0) {
+            uvErrMsgSys(errmsg, stat, EACCES);
+	    return UV__ERROR;
+    }
+
+    if (err < 0 && errno == EACCES) {
+        uvErrMsgSys(errmsg, stat, EACCES);
+        return UV__ERROR;
+    }
+
+    inode_t di;
+    char *subdir = NULL, *root = NULL, *p;
     strcpy(dpath, dir);
-    char *subdir = NULL;
-    char *p = strrchr(dpath, '/');
+    p = strrchr(dpath, '/');
     if (p) {
-        *p = 0;
+	*p = 0;
         subdir = p+1;
     }
-    inode_t di;
     ci_t *ci = findFSExportByDir((char*)dpath, &di);
     if (!ci) {
-        uvErrMsgPrintf(errmsg, "mkdir: Permission denied");
-        return 1;
+        uvErrMsgSys(errmsg, mkdir, EACCES);
+        return UV__ERROR;
     }
     if (di == 0) {
-        uvErrMsgPrintf(errmsg, "stat: Permission denied");
-        return 1;
+        uvErrMsgSys(errmsg, stat, EACCES);
+        return UV__ERROR;
+    }
+
+    strcpy(dpath, dir);
+    /* Get tenant */
+    p = strchr(dpath, '/');
+    /* Get bucket */
+    if (p) {
+		p = strchr(p+1,'/');
+    }
+    /* Get root */
+    if (p) {
+		root = strchr(p+1,'/');
+    }
+    p = strrchr(dpath, '/');
+    if (p) {
+        subdir = p+1;
     }
     if (subdir) {
-        int err = ccow_fsio_mkdir(ci, di, subdir, DEFAULT_DIR_PERM, 0, 0, NULL);
-	if (err && err != EEXIST) {
-            uvErrMsgPrintf(errmsg, "Not a directory");
-            return 1;
-        }
+	inode_t ino;
+	/* Search the entire path starting from root */
+	assert(root[0] == '/');
+	int err = ccow_fsio_find(ci, root, &ino);
+	if (err != 0 && err == ENOENT) {
+		err = ccow_fsio_mkdir(ci, di, subdir, DEFAULT_DIR_PERM,
+				geteuid(), getegid(), NULL);
+		if (err) {
+			uvErrMsgSys(errmsg, mkdir, ENOTDIR);
+			return UV__ERROR;
+		}
+	} else if (err == 0) {
+		err = uvCheckAccess(ci, ino);
+		if (err) {
+			uvErrMsgSys(errmsg, stat, EACCES);
+			return UV__ERROR;
+		}
+	}
+
     }
     return 0;
 }
 
 int uvSyncDir(const uvDir dir, char *errmsg)
 {
-    /* TODO: consider to export ccowfs_inode_flusher() */
-    return 0;
-}
+    char dpath[UV__PATH_MAX_LEN];
+    int err;
 
-static int
-recursive_walk(inode_t parent, fsio_dir_entry *dir_entry, uint64_t count, void *ptr)
-{
-	uint64_t i;
-	ci_t *ci = ptr;
+    strcpy(dpath, dir);
+    char *subdir = strrchr(dpath, '/');
+    inode_t di;
 
-	for (i=0; i< count; i++) {
-		if (dir_entry[i].name[0] == '.' && (dir_entry[i].name[1] == '\0' ||
-			    (dir_entry[i].name[1] == '.' && dir_entry[i].name[2] == '\0')))
-			continue;
-
-		if (ccow_fsio_is_dir(ci, dir_entry[i].inode)) {
-			bool eof;
-			ccow_fsio_readdir_cb4(ci, dir_entry[i].inode, recursive_walk, 0, NULL, &eof);
-		}
-		if (dir_entry[i].inode != CCOW_FSIO_ROOT_INODE &&
-		    dir_entry[i].inode != CCOW_FSIO_LOST_FOUND_DIR_INODE) {
-// FIXME: implement, need to pass struct via ptr and fill in here...
-//			int err = ccow_fsio_delete(ci, parent, dir_entry[i].name);
-//			munit_assert_int(err, ==, 0);
+    ci_t *ci = findFSExportByDir((char*)dpath, &di);
+    if (!ci) {
+        uvErrMsgSys(errmsg, open, ENOENT);
+        return UV__ERROR;
+    }
+    if (di == 0) {
+        uvErrMsgSys(errmsg, stat, EACCES);
+        return UV__ERROR;
+    }
+    if (subdir) {
+	ccow_fsio_file_t *file;
+	int err = ccow_fsio_open(ci, subdir, &file, O_RDONLY | O_DIRECTORY);
+	if (err == 0) {
+		err = ccow_fsio_flush(file);
+		ccow_fsio_close(file);
+		if (err) {
+			uvErrMsgSys(errmsg, sync, EIO);
+			return UV__ERROR;
 		}
 	}
 
-	return (0);
+    }
+    return 0;
+}
+
+struct ccow_dir_data {
+	ci_t *ci;
+	struct dirent **dir_ents;
+	int dir_count;
+	uv_cond_t wait_cond;
+	uv_mutex_t wait_mutex;
+};
+
+static int
+list_cb(inode_t parent, fsio_dir_entry *dir_entry, uint64_t count, void *ptr)
+{
+	int err = 0;
+	uint64_t i;
+	struct ccow_dir_data *dirp = ptr;
+	assert (dirp != NULL);
+
+	if (dirp->dir_ents) {
+		dirp->dir_ents = reallocarray(dirp->dir_ents,
+				count + dirp->dir_count,
+				sizeof (struct dirent *));
+	} else {
+		dirp->dir_ents = calloc(count + dirp->dir_count,
+				sizeof (struct dirent *));
+	}
+	if (dirp->dir_ents == NULL) {
+		err = 1;
+		goto _out;
+	}
+
+	int idx = dirp->dir_count;
+	for (i = 0; i < count; i++) {
+		size_t len;
+		dirp->dir_ents[idx] = calloc(1, sizeof (struct dirent));
+		if (dirp->dir_ents[idx] == NULL) {
+			err = 1;
+			break;
+		}
+
+		dirp->dir_ents[idx]->d_ino = dir_entry[i].inode;
+		len = strlen(dir_entry[i].name) > 255 ?
+			255 : strlen(dir_entry[i].name);
+		dirp->dir_ents[idx]->d_reclen = len;
+		strncpy(dirp->dir_ents[idx]->d_name, dir_entry[i].name, len);
+		dirp->dir_ents[idx]->d_type = DT_UNKNOWN;
+		if (INODE_IS_DIR(dir_entry[i].inode))
+			dirp->dir_ents[idx]->d_type = DT_DIR;
+		else if (INODE_IS_FILE(dir_entry[i].inode))
+			dirp->dir_ents[idx]->d_type = DT_REG;
+		else if (INODE_IS_SYMLINK(dir_entry[i].inode))
+			dirp->dir_ents[idx]->d_type = DT_LNK;
+		dirp->dir_count++;
+		idx++;
+	}
+
+_out:
+	uv_cond_signal(&dirp->wait_cond);
+	return err;
 }
 
 int uvScanDir(const uvDir dir,
@@ -93,15 +208,35 @@ int uvScanDir(const uvDir dir,
               char *errmsg)
 {
     inode_t di;
+    int err = 0;
+    bool eof = false;
+    struct ccow_dir_data dir_info;
+    char *start = NULL;
+
     ci_t *ci = findFSExportByDir((char*)dir, &di);
     if (!ci || di == 0)
         return UV__ERROR;
 
-    bool eof;
-    int err = ccow_fsio_readdir_cb4(ci, di, recursive_walk, 0, ci, &eof);
-    if (err)
-        return UV__ERROR;
-    return 0;
+    memset(&dir_info, 0, sizeof dir_info);
+    uv_cond_init(&dir_info.wait_cond);
+    uv_mutex_init(&dir_info.wait_mutex);
+
+    while (err == 0 && !eof) {
+	    start = dir_info.dir_count ?
+		    dir_info.dir_ents[dir_info.dir_count - 1]->d_name : NULL;
+	    err = ccow_fsio_readdir_cb4(ci, di, list_cb, start,
+			    &dir_info, &eof);
+	    if (err == 0 && !eof) {
+		    uv_mutex_lock(&dir_info.wait_mutex);
+		    uv_cond_wait(&dir_info.wait_cond, &dir_info.wait_mutex);
+		    uv_mutex_unlock(&dir_info.wait_mutex);
+	    }
+    }
+    uv_cond_destroy(&dir_info.wait_cond);
+    uv_mutex_destroy(&dir_info.wait_mutex);
+    *entries = dir_info.dir_ents;
+    *n_entries = dir_info.dir_count;
+    return err ? UV__ERROR : 0;
 }
 
 static void skip_free(void *ptr) {}
@@ -113,41 +248,67 @@ int uvOpenFile(const uvDir dir,
                char *errmsg)
 {
     int err;
-    struct uvFile *f = raft_calloc(1, sizeof(struct uvFile));
-    if (!f)
+    //struct uvFile *f = raft_calloc(1, sizeof(struct uvFile));
+    struct uvFile *f = calloc(1, sizeof(struct uvFile));
+    if (!f) {
+        uvErrMsgSys(errmsg, open, ENOMEM);
         return UV__ERROR;
+    }
+
     f->ci = findFSExportByDir((char*)dir, &f->subdir_inode);
     if (!f->ci) {
-        uvErrMsgPrintf(errmsg, "open: Permission denied");
-        raft_free(f);
+        uvErrMsgSys(errmsg, open, EACCES);
+        free(f);
         return UV__ERROR;
     }
     if (f->subdir_inode == 0) {
-        uvErrMsgPrintf(errmsg, "open: Permission denied");
-        raft_free(f);
+        uvErrMsgSys(errmsg, open, EACCES);
+        free(f);
         return UV__NOENT;
     }
 
+    err = uvCheckAccess(f->ci, f->subdir_inode);
+
     if (flags & O_CREAT) {
+	if (err) {
+		uvErrMsgSys(errmsg, open, err);
+                free(f);
+                return UV__ERROR;
+	}
         err = ccow_fsio_touch(f->ci, f->subdir_inode, (char*)filename,
-            0600, 0, 0, &f->inode);
+            0600, geteuid(), getegid(), &f->inode);
         if (err && err != EEXIST) {
             uvErrMsgPrintf(errmsg, "touch err %d", err);
-            raft_free(f);
+            free(f);
             return UV__ERROR;
         }
     } else {
+	if (err == EACCES) {
+		uvErrMsgSys(errmsg, open, err);
+                free(f);
+                return UV__ERROR;
+	}
         uvPath path;
-        uvJoin(dir, filename, path);
+	char *root = NULL, *p;
+	/* Get tenant */
+	p = strchr(dir, '/');
+	/* Get bucket */
+	if (p)
+		p = strchr(p+1,'/');
+	/* Get root */
+	if (p)
+		root = strchr(p+1,'/');
+        uvJoin(root, filename, path);
+
         err = ccow_fsio_find(f->ci, path, &f->inode);
         if (err) {
             if (err == ENOENT) {
-                uvErrMsgPrintf(errmsg, "open: File not found");
-                raft_free(f);
+		uvErrMsgSys(errmsg, open, ENOENT);
+                free(f);
                 return UV__NOENT;
             }
             uvErrMsgPrintf(errmsg, "open: err %d", err);
-            raft_free(f);
+            free(f);
             return UV__ERROR;
         }
     }
@@ -155,7 +316,7 @@ int uvOpenFile(const uvDir dir,
     err = ccow_fsio_openi(f->ci, f->inode, &f->file, flags);
     if (err) {
         uvErrMsgPrintf(errmsg, "openi err %d", err);
-        raft_free(f);
+        free(f);
         return UV__ERROR;
     }
 
@@ -169,7 +330,7 @@ int uvCloseFile(uvFd fd)
 {
     struct uvFile *f = fd;
     int err = ccow_fsio_close(f->file);
-    raft_free(f);
+    free(f);
     return err ? UV__ERROR : 0;
 }
 
@@ -186,9 +347,9 @@ int uvStatFile(const uvDir dir,
     inode_t ino;
     err = ccow_fsio_lookup(ci, di, (char*)filename, &ino);
     if (err)
-        return UV__ERROR;
+        return err == ENOENT ? UV__NOENT : UV__ERROR;
     err = ccow_fsio_get_file_stat(ci, ino, sb);
-    return err;
+    return err ? UV__ERROR : 0;
 }
 
 int uvUnlinkFile(const char *dir, const char *filename, char *errmsg)
@@ -242,6 +403,7 @@ int uvReadFully(const uvFd fd, void *buf, const size_t n, char *errmsg)
         uvErrMsgPrintf(errmsg, "short read: %d bytes instead of %ld", (int)read_amount, n);
         return UV__NODATA;
     }
+    f->offset += read_amount;
     return 0;
 }
 
@@ -258,9 +420,11 @@ int uvWriteFully(const uvFd fd, void *buf, const size_t n, char *errmsg)
         uvErrMsgPrintf(errmsg, "short write: %d bytes instead of %ld", (int)write_amount, n);
         return UV__NODATA;
     }
+    f->offset += write_amount;
     return 0;
 }
 
+#if defined(UV_CCOWFSIO_ENABLED)
 off_t uvLseek(uvFd fd, off_t offset, int whence)
 {
     struct uvFile *f = fd;
@@ -280,6 +444,7 @@ off_t uvLseek(uvFd fd, off_t offset, int whence)
         assert(0);
     return f->offset;
 }
+#endif /* !UV_CCOWFSIO_ENABLED */
 
 ssize_t uvWritev(uvFd fd, const struct iovec *iov, int iovcnt)
 {
@@ -810,12 +975,70 @@ static int probeAsyncIO(int fd, size_t size, bool *ok, char *errmsg)
     return 0;
 }
 
+#if !defined(UV_CCOWFSIO_ENABLED)
 off_t uvLseek(uvFd fd, off_t offset, int whence)
 {
 	return lseek(fd, offset, whence);
 }
+#endif /* !UV_CCOWFSIO_ENABLED */
+
 #endif /* RWF_NOWAIT */
 
+#if defined(UV_CCOWFSIO_ENABLED)
+int uvProbeIoCapabilities(const uvDir dir,
+                          size_t *direct,
+                          bool *async,
+                          char *errmsg)
+{
+	char *root = NULL, *fstr, *p;
+	uvFilename filename; /* Filename of the probe file */
+	uvPath path;         /* Full path of the probe file */
+	inode_t di, ino;
+	int err;
+
+	*async = false;
+	*direct = false;
+
+	ci_t *ci = findFSExportByDir((char*)dir, &di);
+	if (!ci || di == 0) {
+		uvErrMsgSys(errmsg, mkstemp, EACCES);
+		return UV__ERROR;
+	}
+
+	/* Get tenant */
+	p = strchr(dir, '/');
+	/* Get bucket */
+	if (p)
+		p = strchr(p+1,'/');
+	/* Get root */
+	if (p)
+		root = strchr(p+1,'/');
+
+	/* Create a temporary probe file. */
+	tmpnam(filename);
+	fstr = strrchr(filename, '/');
+	fstr++;
+
+	assert(root[0] == '/');
+	err = ccow_fsio_find(ci, root, &di);
+	assert(err == 0);
+
+	err = uvCheckAccess(ci, di);
+	if (err) {
+		uvErrMsgSys(errmsg, mkstemp, EACCES);
+		return UV__ERROR;
+	}
+
+        err = ccow_fsio_touch(ci, di, fstr, 0600, geteuid(), getegid(), &ino);
+	if (err) {
+		uvErrMsgSys(errmsg, mkstemp, EACCES);
+		return UV__ERROR;
+	}
+	err = ccow_fsio_delete(ci, di, (char*)filename);
+	assert(err == 0);
+	return 0;
+}
+#else
 int uvProbeIoCapabilities(const uvDir dir,
                           size_t *direct,
                           bool *async,
@@ -881,6 +1104,7 @@ err_after_file_open:
 err:
     return UV__ERROR;
 }
+#endif
 
 int uvSetDirectIo(int fd, char *errmsg)
 {

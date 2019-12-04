@@ -52,7 +52,8 @@
 
 #define SETUP_UV      \
     SETUP_UV_NO_INIT; \
-    UV_INIT
+    UV_INIT; \
+    TEAR_DOWN_DIR
 
 #define TEAR_DOWN_UV                  \
     if (f == NULL) {                  \

@@ -65,7 +65,7 @@ findFSExportByDir(char *dir, inode_t *subdir_inode)
 
 		if (*subdir) {
 			err = ccow_fsio_mkdir(ci, CCOW_FSIO_ROOT_INODE, subdir,
-			    S_IFDIR | 0750, 0, 0, subdir_inode);
+			    S_IFDIR | 0750, geteuid(), getegid(), subdir_inode);
 			if (err && err != EEXIST) {
 				ccow_fsio_delete_export(ci);
 				ccow_fsio_ci_free(ci);
@@ -74,10 +74,20 @@ findFSExportByDir(char *dir, inode_t *subdir_inode)
 		} else
 			*subdir_inode = CCOW_FSIO_ROOT_INODE;
 	} else {
-		if (*subdir) {
-			memmove(subdir+1, subdir, strlen(subdir)+1); *subdir = '/';
-			err = ccow_fsio_find(ci, subdir, subdir_inode);
+		char *root;
+		root = strchr(dir, '/');
+		/* Get bucket */
+		if (root) {
+			root = strchr(root + 1,'/');
+		}
+		/* Get root */
+		if (root) {
+			root = strchr(root + 1,'/');
+		}
+		if (root) {
+			err = ccow_fsio_find(ci, root, subdir_inode);
 			if (err) {
+				*subdir_inode = CCOW_FSIO_ROOT_INODE;
 				return ci;
 			}
 		} else
@@ -85,6 +95,48 @@ findFSExportByDir(char *dir, inode_t *subdir_inode)
 	}
 
 	return ci;
+}
+
+int uvCheckAccess(ci_t *ci, inode_t inode)
+{
+	struct stat sb;
+	uid_t euid;
+	gid_t egid;
+	int err;
+
+	euid = geteuid();
+	egid = getegid();
+
+	/* root does not require permission */
+	if (euid == 0) {
+		return 0;
+	}
+
+	memset(&sb, 0, sizeof sb);
+	err = ccow_fsio_get_file_stat(ci, inode, &sb);
+	if (err)
+		return err;
+
+	if (euid == sb.st_uid) {
+		if (!(sb.st_mode & S_IXUSR) || !(sb.st_mode & S_IRUSR))
+			return EACCES;
+		if (!(sb.st_mode & S_IWUSR))
+			return EPERM;
+		return 0;
+	}
+
+	if (egid == sb.st_gid) {
+		if (!(sb.st_mode & S_IXGRP) || !(sb.st_mode & S_IRGRP))
+			return EACCES;
+		if (!(sb.st_mode & S_IWGRP))
+			return EPERM;
+		return 0;
+	}
+	if (!(sb.st_mode & S_IXOTH) || !(sb.st_mode & S_IROTH))
+		return EACCES;
+	if (!(sb.st_mode & S_IWOTH))
+		return EPERM;
+	return 0;
 }
 
 int uvFileInit(struct uvFile *f,
@@ -111,6 +163,7 @@ createAfterWorkCb(uv_work_t *work, int status)
 	req = work->data;
 	assert(req != NULL);
 	f = req->file;
+	req->status = status;
 
 	/* If we were closed, abort here. */
 	if (f->closing) {
@@ -142,6 +195,7 @@ createWorkCb(uv_work_t *work)
 		return;
 	}
 
+#if 0
 	err = ccow_fsio_touch(f->ci, f->subdir_inode, req->filename,
 	    0600, 0, 0, &f->inode);
 	if (err && err != EEXIST) {
@@ -156,17 +210,24 @@ createWorkCb(uv_work_t *work)
 		req->status = UV__ERROR;
 		return;
 	}
-
-	ccow_fsio_write_free_set(f->file, skip_free);
+#endif
 
 	static char b;
 	size_t write_amount = 0;
+	ccow_fsio_write_free_set(f->file, skip_free);
 	err = ccow_fsio_write(f->file, req->size - 1, 1, (void *)&b, &write_amount);
 	if (err || write_amount != 1) {
 		uvErrMsgPrintf(req->errmsg, "write err %d", err);
 		req->status = UV__ERROR;
 		return;
 	}
+	err = ccow_fsio_flush(f->file);
+	if (err) {
+		uvErrMsgSys(req->errmsg, fsync, err);
+		req->status = UV__ERROR;
+		return;
+	}
+	req->status = 0;
 }
 
 int
@@ -190,7 +251,7 @@ uvFileCreate(struct uvFile *f,
 	req->work.data = req;
 
 	if (strchr(filename, '/')) {
-		uvErrMsgPrintf(errmsg, "open: No such file or directory");
+		uvErrMsgSys(errmsg, open, ENOENT);
 		req->status = UV__NOENT;
 		return req->status;
 	}
@@ -208,6 +269,7 @@ uvFileCreate(struct uvFile *f,
 		return req->status;
 	}
 
+#if 0
 	inode_t fi;
 	err = ccow_fsio_lookup(f->ci, f->subdir_inode, filename, &fi);
 	if (err != ENOENT) {
@@ -215,6 +277,38 @@ uvFileCreate(struct uvFile *f,
 		req->status = UV__ERROR;
 		return req->status;
 	}
+#else
+	err = uvCheckAccess(f->ci, f->subdir_inode);
+	if (err) {
+		uvErrMsgPrintf(req->errmsg, "access err %d", err);
+		req->status = UV__ERROR;
+		return req->status;
+	}
+
+	inode_t fi;
+	err = ccow_fsio_lookup(f->ci, f->subdir_inode, filename, &fi);
+	if (err == 0) {
+		uvErrMsgSys(errmsg, open, EEXIST);
+		req->status = UV__ERROR;
+		return req->status;
+	}
+
+	err = ccow_fsio_touch(f->ci, f->subdir_inode, req->filename,
+	    0600, geteuid(), getegid(), &f->inode);
+	//if (err && err != EEXIST) {
+	if (err) {
+		uvErrMsgSys(errmsg, open, err);
+		req->status = UV__ERROR;
+		return req->status;
+	}
+
+	err = ccow_fsio_openi(f->ci, f->inode, &f->file, O_RDWR);
+	if (err) {
+		uvErrMsgSys(errmsg, open, err);
+		req->status = UV__ERROR;
+		return req->status;
+	}
+#endif
 
 	err = uv_queue_work(f->loop, &req->work, createWorkCb, createAfterWorkCb);
 	if (err) {
@@ -298,11 +392,13 @@ uvFileWrite(struct uvFile *f,
 	req->bufs_count = n;
 	req->offset = offset;
 	req->cb = cb;
+	req->status = 0;
 
 	rv = uv_queue_work(f->loop, &req->work, writeWorkCb, writeAfterWorkCb);
 	if (rv != 0) {
 		/* UNTESTED: with the current libuv implementation this can't fail. */
 		uvErrMsgPrintf(errmsg, "uv_queue_work: %s", uv_strerror(uv_last_error(f->loop)));
+		req->status = UV__ERROR;
 		return UV__ERROR;
 	}
 	return rv;
@@ -339,6 +435,7 @@ uvFileClose(struct uvFile *f, uvFileCloseCb cb)
 {
 	f->closing = true;
 	f->close_cb = cb;
+	f->data = NULL;
 
 	if (f->file) {
 		if (!cb) {
@@ -346,7 +443,7 @@ uvFileClose(struct uvFile *f, uvFileCloseCb cb)
 			return;
 		}
 
-		uv_work_t *req = calloc(1, sizeof(req));
+		uv_work_t *req = calloc(1, sizeof(*req));
 		req->data = f;
 		int err = uv_queue_work(f->loop, req, closeWorkCb, closeAfterWorkCb);
 		if (err != 0) {
@@ -355,7 +452,7 @@ uvFileClose(struct uvFile *f, uvFileCloseCb cb)
 		}
 	} else {
 		if (cb) {
-			cb(NULL);
+			cb(f);
 		}
 	}
 }

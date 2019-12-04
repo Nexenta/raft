@@ -189,6 +189,10 @@ recursive_delete(inode_t parent, fsio_dir_entry *dir_entry, uint64_t count, void
 
 void tearDownDir(void *data)
 {
+	if (data == NULL) {
+		return;
+	}
+
 	inode_t di;
 	ci_t *ci = findFSExportByDir((char*)data, &di);
 	munit_assert_not_null(ci);
@@ -203,12 +207,15 @@ void test_dir_tear_down(char *dir)
     tearDownDir(dir);
 }
 
+static void skip_free(void *ptr) {}
+
 void test_dir_write_file(const char *dir,
                          const char *filename,
                          const void *buf,
                          const size_t n)
 {
 	inode_t di, fi;
+
 	ci_t *ci = findFSExportByDir((char*)dir, &di);
 	munit_assert_not_null(ci);
 
@@ -222,11 +229,15 @@ void test_dir_write_file(const char *dir,
 	if (err) {
 	}
 
-	char *b = malloc(n); memcpy(b, buf, n);
-	size_t write_amount = 0;
-	err = ccow_fsio_write(f, 0, n, (void *)b, &write_amount);
-	munit_assert_int(err, ==, 0);
-	munit_assert_int(write_amount, ==, n);
+	if (buf && n > 0) {
+		size_t write_amount = 0;
+		ccow_fsio_write_free_set(f, skip_free);
+		err = ccow_fsio_write(f, 0, n, (void *)buf, &write_amount);
+		if (err == 0)
+			ccow_fsio_flush(f);
+		munit_assert_int(err, ==, 0);
+		munit_assert_int(write_amount, ==, n);
+	}
 
 	ccow_fsio_close(f);
 }
@@ -235,6 +246,14 @@ void test_dir_write_file_with_zeros(const char *dir,
                                     const char *filename,
                                     const size_t n)
 {
+    void *buf;
+
+    buf = munit_malloc(n);
+    memset(buf, 0, n);
+
+    test_dir_write_file(dir, filename, buf, n);
+
+    free(buf);
 }
 
 void test_dir_append_file(const char *dir,
@@ -242,6 +261,42 @@ void test_dir_append_file(const char *dir,
                           const void *buf,
                           const size_t n)
 {
+	struct stat sb;
+	uvPath path;
+	char *root = NULL, *p;
+	int err;
+	inode_t di, fi;
+
+	ci_t *ci = findFSExportByDir((char*)dir, &di);
+	munit_assert_not_null(ci);
+
+	/* Get tenant */
+	p = strchr(dir, '/');
+	/* Get bucket */
+	if (p)
+		p = strchr(p+1,'/');
+	/* Get root */
+	if (p)
+		root = strchr(p+1,'/');
+	uvJoin(root, filename, path);
+
+	assert(path[0] == '/');
+	err = ccow_fsio_find(ci, path, &fi);
+	munit_assert_int(err, ==, 0);
+
+	err = ccow_fsio_get_file_stat(ci, fi, &sb);
+	munit_assert_int(err, ==, 0);
+
+	ccow_fsio_file_t *f;
+	err = ccow_fsio_open(ci, path, &f, O_RDWR | O_APPEND);
+	munit_assert_int(err, ==, 0);
+
+	munit_assert_int(n, !=, 0);
+	size_t write_amount = 0;
+	ccow_fsio_write_free_set(f, skip_free);
+	err = ccow_fsio_write(f, sb.st_size, n, (void *)buf, &write_amount);
+	munit_assert_int(err, ==, 0);
+	munit_assert_int(write_amount, ==, n);
 }
 
 void test_dir_overwrite_file(const char *dir,
@@ -250,6 +305,37 @@ void test_dir_overwrite_file(const char *dir,
                              const size_t n,
                              const off_t whence)
 {
+	uvPath path;
+	char *root = NULL, *p;
+	int err;
+	inode_t di, fi;
+
+	ci_t *ci = findFSExportByDir((char*)dir, &di);
+	munit_assert_not_null(ci);
+
+	/* Get tenant */
+	p = strchr(dir, '/');
+	/* Get bucket */
+	if (p)
+		p = strchr(p+1,'/');
+	/* Get root */
+	if (p)
+		root = strchr(p+1,'/');
+	uvJoin(root, filename, path);
+
+	ccow_fsio_file_t *f;
+	err = ccow_fsio_open(ci, path, &f, O_RDWR);
+	munit_assert_int(err, ==, 0);
+
+	size_t write_amount = 0;
+	ccow_fsio_write_free_set(f, skip_free);
+	err = ccow_fsio_write(f, whence, n, (void *)buf, &write_amount);
+	if (err == 0)
+		ccow_fsio_flush(f);
+	munit_assert_int(err, ==, 0);
+	munit_assert_int(write_amount, ==, n);
+
+	ccow_fsio_close(f);
 }
 
 void test_dir_overwrite_file_with_zeros(const char *dir,
@@ -257,12 +343,70 @@ void test_dir_overwrite_file_with_zeros(const char *dir,
                                         const size_t n,
                                         const off_t whence)
 {
+    void *buf;
+
+    buf = munit_malloc(n);
+    memset(buf, 0, n);
+
+    test_dir_overwrite_file(dir, filename, buf, n, whence);
+
+    free(buf);
 }
 
+/*
+ * TODO: This is emulation. Replace with real truncate which releases the
+ * disk space as well.
+ */
 void test_dir_truncate_file(const char *dir,
                             const char *filename,
                             const size_t n)
 {
+	char dpath[UV__PATH_MAX_LEN], *root;
+	uvPath path;
+
+	strcpy(dpath, dir);
+	char *subdir = NULL;
+	char *p = strrchr(dpath, '/');
+	if (p) {
+		*p = 0;
+		subdir = p+1;
+	}
+	inode_t di, fi;
+	ci_t *ci = findFSExportByDir((char*)dpath, &di);
+	munit_assert_not_null(ci);
+	munit_assert(di != 0);
+
+	strcpy(dpath, dir);
+	/* Get tenant */
+	p = strchr(dpath, '/');
+	/* Get bucket */
+	if (p)
+		p = strchr(p+1,'/');
+	/* Get root */
+	if (p)
+		root = strchr(p+1,'/');
+	p = strrchr(dpath, '/');
+	if (p)
+		subdir = p+1;
+	if (subdir) {
+		struct stat sb;
+		inode_t ino;
+		uvJoin(root, filename, path);
+		assert(path[0] == '/');
+		int err = ccow_fsio_find(ci, path, &ino);
+		if (err == 0) {
+			err = ccow_fsio_get_file_stat(ci, ino, &sb);
+			if (err == 0) {
+				sb.st_size = n;
+				ccow_fsio_set_file_stat(ci, ino, &sb);
+				ccow_fsio_file_t *file;
+				err = ccow_fsio_open(ci, path,
+						&file, O_RDONLY);
+				if (err == 0)
+					ccow_fsio_flush(file);
+			}
+		}
+	}
 }
 
 void test_dir_read_file(const char *dir,
@@ -289,7 +433,7 @@ void test_dir_read_file(const char *dir,
 
 bool test_dir_exists(const char *dir)
 {
-	char dpath[1024];
+	char dpath[UV__PATH_MAX_LEN];
 	strcpy(dpath, dir);
 	char *subdir = NULL;
 	char *p = strrchr(dpath, '/');
@@ -310,10 +454,87 @@ bool test_dir_exists(const char *dir)
 
 void test_dir_unexecutable(const char *dir)
 {
+	char dpath[UV__PATH_MAX_LEN], *root;
+	strcpy(dpath, dir);
+	char *subdir = NULL;
+	char *p = strrchr(dpath, '/');
+	if (p) {
+		*p = 0;
+		subdir = p+1;
+	}
+	inode_t di, fi;
+	ci_t *ci = findFSExportByDir((char*)dpath, &di);
+	munit_assert_not_null(ci);
+	munit_assert(di != 0);
+
+	strcpy(dpath, dir);
+	/* Get tenant */
+	p = strchr(dpath, '/');
+	/* Get bucket */
+	if (p)
+		p = strchr(p+1,'/');
+	/* Get root */
+	if (p)
+		root = strchr(p+1,'/');
+	p = strrchr(dpath, '/');
+	if (p)
+		subdir = p+1;
+	if (subdir) {
+		struct stat sb;
+		inode_t ino;
+		assert(root[0] == '/');
+		int err = ccow_fsio_find(ci, root, &ino);
+		if (err == 0) {
+			err = ccow_fsio_get_file_stat(ci, ino, &sb);
+			if (err == 0) {
+				sb.st_mode = 0;
+				ccow_fsio_set_file_stat(ci, ino, &sb);
+			}
+		}
+	}
 }
 
 void test_dir_unreadable_file(const char *dir, const char *filename)
 {
+	char dpath[UV__PATH_MAX_LEN], *root;
+	strcpy(dpath, dir);
+	char *subdir = NULL;
+	char *p = strrchr(dpath, '/');
+	if (p) {
+		*p = 0;
+		subdir = p+1;
+	}
+	inode_t di, fi;
+	ci_t *ci = findFSExportByDir((char*)dpath, &di);
+	munit_assert_not_null(ci);
+	munit_assert(di != 0);
+
+	strcpy(dpath, dir);
+	/* Get tenant */
+	p = strchr(dpath, '/');
+	/* Get bucket */
+	if (p)
+		p = strchr(p+1,'/');
+	/* Get root */
+	if (p)
+		root = strchr(p+1,'/');
+	p = strrchr(dpath, '/');
+	if (p)
+		subdir = p+1;
+	if (subdir) {
+		struct stat sb;
+		inode_t ino, fino;
+		assert(root[0] == '/');
+		int err = ccow_fsio_find(ci, root, &ino);
+		munit_assert (err == 0);
+		err = ccow_fsio_lookup(ci, ino, filename, &fino);
+		munit_assert (err == 0);
+		err = ccow_fsio_get_file_stat(ci, fino, &sb);
+		if (err == 0) {
+			sb.st_mode = 0;
+			ccow_fsio_set_file_stat(ci, fino, &sb);
+		}
+	}
 }
 
 bool test_dir_has_file(const char *dir, const char *filename)

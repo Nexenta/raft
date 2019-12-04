@@ -602,7 +602,7 @@ TEST_CASE(close, current_segment, NULL)
 
     UV_CLOSE;
 
-    LOOP_RUN(2);
+    LOOP_RUN(6);
 
     munit_assert_true(test_dir_has_file(f->dir, "1-1"));
 

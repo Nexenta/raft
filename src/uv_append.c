@@ -527,6 +527,10 @@ static int enqueueRequest(struct uv *uv, struct append *req)
     }
 
     segment = lastSegment(uv); /* Get the last added segment */
+    if (segment == NULL) {
+	    rv = RAFT_IOERR;
+	    goto err;
+    }
     reserveSegmentCapacity(segment, req->size);
 
     req->segment = segment;
