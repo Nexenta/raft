@@ -295,8 +295,10 @@ static void writePollCb(uv_poll_t *poller, int status, int events)
             if (rv != 0) {
                 /* UNTESTED: with the current libuv implementation this should
                  * never fail. */
+#if 0
                 uvErrMsgPrintf(req->errmsg, "uv_queue_work: %s",
                                uv_strerror(rv));
+#endif
                 req->status = UV__ERROR;
                 goto finish;
             }

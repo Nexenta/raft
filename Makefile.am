@@ -116,16 +116,16 @@ raft_uv_SOURCES = \
   src/uv_tcp_listen.c \
   src/uv_truncate.c
 
+libraft_la_SOURCES += $(raft_uv_SOURCES)
+libraft_la_LDFLAGS += $(UV_LIBS)
+
 if UV_CCOWFSIO_ENABLED
 raft_uv_SOURCES += src/uv_ccowfsio_file.c
 libraft_la_LDFLAGS += -lccowfsio
 AM_CFLAGS += -DUV_CCOWFSIO_ENABLED=1
 else
-libraft_la_SOURCES += src/uv_file.c
+raft_uv_SOURCES += src/uv_file.c
 endif
-
-libraft_la_SOURCES += $(raft_uv_SOURCES)
-libraft_la_LDFLAGS += $(UV_LIBS)
 
 raftinclude_HEADERS += include/raft/uv.h
 

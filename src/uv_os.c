@@ -975,13 +975,6 @@ static int probeAsyncIO(int fd, size_t size, bool *ok, char *errmsg)
     return 0;
 }
 
-#if !defined(UV_CCOWFSIO_ENABLED)
-off_t uvLseek(uvFd fd, off_t offset, int whence)
-{
-	return lseek(fd, offset, whence);
-}
-#endif /* !UV_CCOWFSIO_ENABLED */
-
 #endif /* RWF_NOWAIT */
 
 #if defined(UV_CCOWFSIO_ENABLED)
