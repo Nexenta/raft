@@ -399,6 +399,7 @@ uvFileWrite(struct uvFile *f,
 		/* UNTESTED: with the current libuv implementation this can't fail. */
 		uvErrMsgPrintf(errmsg, "uv_queue_work: %s", uv_strerror(uv_last_error(f->loop)));
 		req->status = UV__ERROR;
+		req->cb(req, req->status, req->errmsg);
 		return UV__ERROR;
 	}
 	return rv;

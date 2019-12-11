@@ -340,6 +340,7 @@ int uvStatFile(const uvDir dir,
                char *errmsg)
 {
     inode_t di;
+
     ci_t *ci = findFSExportByDir((char*)dir, &di);
     if (!ci || di == 0)
         return UV__ERROR;
@@ -363,10 +364,21 @@ int uvUnlinkFile(const char *dir, const char *filename, char *errmsg)
 
 int uvFtruncate(uvFd fd, off_t length)
 {
-    /* FIXME: missing ccow_fsio_truncate() support
+    /* FIXME: missing ccow_fsio_truncate() support */
     struct uvFile *f = fd;
-    */
-    return 0;
+    struct stat sb;
+    int err;
+
+    memset(&sb, 0, sizeof sb);
+    err = ccow_fsio_get_file_stat(f->ci, f->inode, &sb);
+    if (err = 0) {
+	    sb.st_size = length;
+	    err = ccow_fsio_set_file_stat(f->ci, f->inode, &sb);
+	    if (err == 0 && f->offset > length)
+		    f->offset = length;
+
+    }
+    return err;
 }
 
 int uvFsync(uvFd fd)
@@ -418,13 +430,12 @@ int uvWriteFully(const uvFd fd, void *buf, const size_t n, char *errmsg)
     }
     if (write_amount < n) {
         uvErrMsgPrintf(errmsg, "short write: %d bytes instead of %ld", (int)write_amount, n);
-        return UV__NODATA;
+        return UV__ERROR;
     }
     f->offset += write_amount;
     return 0;
 }
 
-#if defined(UV_CCOWFSIO_ENABLED)
 off_t uvLseek(uvFd fd, off_t offset, int whence)
 {
     struct uvFile *f = fd;
@@ -444,7 +455,6 @@ off_t uvLseek(uvFd fd, off_t offset, int whence)
         assert(0);
     return f->offset;
 }
-#endif /* !UV_CCOWFSIO_ENABLED */
 
 ssize_t uvWritev(uvFd fd, const struct iovec *iov, int iovcnt)
 {
@@ -742,6 +752,7 @@ int uvIsEmptyFile(const uvDir dir,
 {
     struct stat sb;
     int rv;
+
     rv = uvStatFile(dir, filename, &sb, errmsg);
     if (rv != 0) {
         return rv;
