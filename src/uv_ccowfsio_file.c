@@ -428,6 +428,7 @@ closeWorkCb(uv_work_t *work)
 	struct uvFile *f;
 
 	f = work->data;
+	ccow_fsio_flush(f->file);
 	ccow_fsio_close(f->file);
 }
 
@@ -440,6 +441,7 @@ uvFileClose(struct uvFile *f, uvFileCloseCb cb)
 
 	if (f->file) {
 		if (!cb) {
+			ccow_fsio_flush(f->file);
 			ccow_fsio_close(f->file);
 			return;
 		}

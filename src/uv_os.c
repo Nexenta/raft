@@ -329,7 +329,10 @@ int uvOpenFile(const uvDir dir,
 int uvCloseFile(uvFd fd)
 {
     struct uvFile *f = fd;
-    int err = ccow_fsio_close(f->file);
+    int err;
+
+    uvFsync(fd);
+    err = ccow_fsio_close(f->file);
     free(f);
     return err ? UV__ERROR : 0;
 }
@@ -371,12 +374,16 @@ int uvFtruncate(uvFd fd, off_t length)
 
     memset(&sb, 0, sizeof sb);
     err = ccow_fsio_get_file_stat(f->ci, f->inode, &sb);
-    if (err = 0) {
+    if (err == 0) {
 	    sb.st_size = length;
+	    sb.st_ino = f->inode;
 	    err = ccow_fsio_set_file_stat(f->ci, f->inode, &sb);
-	    if (err == 0 && f->offset > length)
+	    if (err == 0 && f->offset > length) {
 		    f->offset = length;
-
+	    }
+	    if (err == 0) {
+		    ccow_fsio_flush(f->file);
+	    }
     }
     return err;
 }
@@ -423,6 +430,7 @@ int uvWriteFully(const uvFd fd, void *buf, const size_t n, char *errmsg)
 {
     struct uvFile *f = fd;
     size_t write_amount;
+
     int err = ccow_fsio_write(f->file, f->offset, n, buf, &write_amount);
     if (err) {
         uvErrMsgSys(errmsg, write, err);
@@ -461,6 +469,7 @@ ssize_t uvWritev(uvFd fd, const struct iovec *iov, int iovcnt)
     int err;
     size_t nb_written, io_amount = 0;
     struct uvFile *f = fd;
+
     for (int i = 0; i < iovcnt; i++) {
         err = ccow_fsio_write(f->file, f->offset,
             iov[i].iov_len, iov[i].iov_base, &nb_written);
@@ -721,6 +730,7 @@ int uvTruncateFile(const uvDir dir,
     uvPath path;
     uvFd fd;
     int rv;
+
     uvJoin(dir, filename, path);
     rv = uvOpenFile(dir, filename, O_RDWR, &fd, errmsg);
     if (rv != 0) {
