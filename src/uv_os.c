@@ -160,9 +160,8 @@ list_cb(inode_t parent, fsio_dir_entry *dir_entry, uint64_t count, void *ptr)
 	assert (dirp != NULL);
 
 	if (dirp->dir_ents) {
-		dirp->dir_ents = reallocarray(dirp->dir_ents,
-				count + dirp->dir_count,
-				sizeof (struct dirent *));
+		dirp->dir_ents = realloc(dirp->dir_ents,
+			(count + dirp->dir_count) * sizeof (struct dirent *));
 	} else {
 		dirp->dir_ents = calloc(count + dirp->dir_count,
 				sizeof (struct dirent *));
