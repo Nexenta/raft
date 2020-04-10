@@ -54,12 +54,31 @@ int uvEnsureDir(const uvDir dir, char *errmsg)
 
     inode_t di;
     char *subdir = NULL, *root = NULL, *p;
+
+    /* Get the path to bucket <cluster>/<tenant>/<bucket> */
     strcpy(dpath, dir);
-    p = strrchr(dpath, '/');
+    /* Get tenant */
+    p = strchr(dpath, '/');
     if (p) {
-	*p = 0;
-        subdir = p+1;
+	/* Get bucket */
+	p = strchr(p+1,'/');
+    } else {
+	/* Did not get tenant name */
+        uvErrMsgSys(errmsg, stat, EACCES);
+        return UV__ERROR;
     }
+    if (p) {
+	/* Check if there is root */
+	root = strchr(p+1,'/');
+	/* We are not interested in the path beyond bucket to check export */
+	if (root)
+		*root = 0;
+    } else {
+	/* Did not get bucket name */
+        uvErrMsgSys(errmsg, stat, EACCES);
+        return UV__ERROR;
+    }
+
     ci_t *ci = findFSExportByDir((char*)dpath, &di);
     if (!ci) {
         uvErrMsgSys(errmsg, mkdir, EACCES);
@@ -89,7 +108,7 @@ int uvEnsureDir(const uvDir dir, char *errmsg)
 	inode_t ino;
 	/* Search the entire path starting from root */
 	assert(root[0] == '/');
-	int err = ccow_fsio_find(ci, root, &ino);
+	err = ccow_fsio_find(ci, root, &ino);
 	if (err != 0 && err == ENOENT) {
 		err = ccow_fsio_mkdir(ci, di, subdir, DEFAULT_DIR_PERM,
 				geteuid(), getegid(), NULL);
@@ -112,7 +131,6 @@ int uvEnsureDir(const uvDir dir, char *errmsg)
 int uvSyncDir(const uvDir dir, char *errmsg)
 {
     char dpath[UV__PATH_MAX_LEN];
-    int err;
 
     strcpy(dpath, dir);
     char *subdir = strrchr(dpath, '/');
@@ -297,7 +315,7 @@ int uvOpenFile(const uvDir dir,
 	/* Get root */
 	if (p)
 		root = strchr(p+1,'/');
-        uvJoin(root, filename, path);
+        uvJoin(root ? root : "", filename, path);
 
         err = ccow_fsio_find(f->ci, path, &f->inode);
         if (err) {
@@ -1005,7 +1023,6 @@ int uvProbeIoCapabilities(const uvDir dir,
 {
 	char *root = NULL, *fstr, *p;
 	uvFilename filename; /* Filename of the probe file */
-	uvPath path;         /* Full path of the probe file */
 	inode_t di, ino;
 	int err;
 
