@@ -1,11 +1,11 @@
+#include "uv_encoding.h"
+
 #include <string.h>
 
 #include "../include/raft/uv.h"
-
 #include "assert.h"
 #include "byte.h"
 #include "configuration.h"
-#include "uv_encoding.h"
 
 /**
  * Size of the request preable.
@@ -14,12 +14,17 @@
     (sizeof(uint64_t) /* Message type. */ + \
      sizeof(uint64_t) /* Message size. */)
 
-size_t sizeofRequestVote(void)
+static size_t sizeofRequestVoteV1(void)
 {
     return sizeof(uint64_t) + /* Term. */
            sizeof(uint64_t) + /* Candidate ID. */
            sizeof(uint64_t) + /* Last log index. */
            sizeof(uint64_t) /* Last log term. */;
+}
+
+static size_t sizeofRequestVote(void)
+{
+    return sizeofRequestVoteV1() + sizeof(uint64_t) /* Leadership transfer. */;
 }
 
 static size_t sizeofRequestVoteResult(void)
@@ -59,6 +64,13 @@ static size_t sizeofInstallSnapshot(const struct raft_install_snapshot *p)
            sizeof(uint64_t);  /* Length of snapshot data */
 }
 
+static size_t sizeofTimeoutNow(void)
+{
+    return sizeof(uint64_t) + /* Term. */
+           sizeof(uint64_t) + /* Last log index. */
+           sizeof(uint64_t) /* Last log term. */;
+}
+
 size_t uvSizeofBatchHeader(size_t n)
 {
     return 8 + /* Number of entries in the batch, little endian */
@@ -73,6 +85,7 @@ static void encodeRequestVote(const struct raft_request_vote *p, void *buf)
     bytePut64(&cursor, p->candidate_id);
     bytePut64(&cursor, p->last_log_index);
     bytePut64(&cursor, p->last_log_term);
+    bytePut64(&cursor, p->disrupt_leader ? 1 : 0);
 }
 
 static void encodeRequestVoteResult(const struct raft_request_vote_result *p,
@@ -127,6 +140,16 @@ static void encodeInstallSnapshot(const struct raft_install_snapshot *p,
     bytePut64(&cursor, p->data.len); /* Snapshot data size. */
 }
 
+static void encodeTimeoutNow(const struct raft_timeout_now *p, void *buf)
+{
+    void *cursor = buf;
+
+    bytePut64(&cursor, p->term);
+    bytePut64(&cursor, p->last_log_index);
+    bytePut64(&cursor, p->last_log_term);
+}
+
+
 int uvEncodeMessage(const struct raft_message *message,
                     uv_buf_t **bufs,
                     unsigned *n_bufs)
@@ -152,6 +175,9 @@ int uvEncodeMessage(const struct raft_message *message,
             break;
         case RAFT_IO_INSTALL_SNAPSHOT:
             header.len += sizeofInstallSnapshot(&message->install_snapshot);
+            break;
+        case RAFT_IO_TIMEOUT_NOW:
+            header.len += sizeofTimeoutNow();
             break;
         default:
             return RAFT_MALFORMED;
@@ -184,6 +210,9 @@ int uvEncodeMessage(const struct raft_message *message,
             break;
         case RAFT_IO_INSTALL_SNAPSHOT:
             encodeInstallSnapshot(&message->install_snapshot, cursor);
+            break;
+        case RAFT_IO_TIMEOUT_NOW:
+            encodeTimeoutNow(&message->timeout_now, cursor);
             break;
     };
 
@@ -247,12 +276,12 @@ void uvEncodeBatchHeader(const struct raft_entry *entries,
         bytePut64(&cursor, entry->term);
 
         /* Message type (Either RAFT_COMMAND or RAFT_CHANGE) */
-        bytePut8(&cursor, entry->type);
+        bytePut8(&cursor, (uint8_t)entry->type);
 
         cursor = (uint8_t *)cursor + 3; /* Unused */
 
         /* Size of the log entry data, little endian. */
-        bytePut32(&cursor, entry->buf.len);
+        bytePut32(&cursor, (uint32_t)entry->buf.len);
     }
 }
 
@@ -266,6 +295,13 @@ static void decodeRequestVote(const uv_buf_t *buf, struct raft_request_vote *p)
     p->candidate_id = byteGet64(&cursor);
     p->last_log_index = byteGet64(&cursor);
     p->last_log_term = byteGet64(&cursor);
+
+    /* Support for legacy request vote that doesn't have disrupt_leader. */
+    if (buf->len == sizeofRequestVoteV1()) {
+        p->disrupt_leader = false;
+    } else {
+        p->disrupt_leader = byteGet64(&cursor) == 1;
+    }
 }
 
 static void decodeRequestVoteResult(const uv_buf_t *buf,
@@ -287,7 +323,7 @@ int uvDecodeBatchHeader(const void *batch,
     size_t i;
     int rv;
 
-    *n = byteGet64(&cursor);
+    *n = (unsigned)byteGet64(&cursor);
 
     if (*n == 0) {
         *entries = NULL;
@@ -313,7 +349,7 @@ int uvDecodeBatchHeader(const void *batch,
             goto err_after_alloc;
         }
 
-        cursor = (uint8_t*)cursor + 3; /* Unused */
+        cursor = (uint8_t *)cursor + 3; /* Unused */
 
         /* Size of the log entry data, little endian. */
         entry->buf.len = byteGet32(&cursor);
@@ -382,20 +418,31 @@ static int decodeInstallSnapshot(const uv_buf_t *buf,
     args->last_index = byteGet64(&cursor);
     args->last_term = byteGet64(&cursor);
     args->conf_index = byteGet64(&cursor);
-    conf.len = byteGet64(&cursor);
+    conf.len = (size_t)byteGet64(&cursor);
     conf.base = (void *)cursor;
     raft_configuration_init(&args->conf);
     rv = configurationDecode(&conf, &args->conf);
     if (rv != 0) {
         return rv;
     }
-    cursor = (uint8_t*)cursor + conf.len;
-    args->data.len = byteGet64(&cursor);
+    cursor = (uint8_t *)cursor + conf.len;
+    args->data.len = (size_t)byteGet64(&cursor);
 
     return 0;
 }
 
-int uvDecodeMessage(unsigned type,
+static void decodeTimeoutNow(const uv_buf_t *buf, struct raft_timeout_now *p)
+{
+    const void *cursor;
+
+    cursor = buf->base;
+
+    p->term = byteGet64(&cursor);
+    p->last_log_index = byteGet64(&cursor);
+    p->last_log_term = byteGet64(&cursor);
+}
+
+int uvDecodeMessage(const unsigned long type,
                     const uv_buf_t *header,
                     struct raft_message *message,
                     size_t *payload_len)
@@ -403,7 +450,8 @@ int uvDecodeMessage(unsigned type,
     unsigned i;
     int rv = 0;
 
-    message->type = type;
+    /* TODO: check type overflow */
+    message->type = (unsigned short)type;
 
     *payload_len = 0;
 
@@ -427,6 +475,9 @@ int uvDecodeMessage(unsigned type,
         case RAFT_IO_INSTALL_SNAPSHOT:
             rv = decodeInstallSnapshot(header, &message->install_snapshot);
             *payload_len += message->install_snapshot.data.len;
+            break;
+        case RAFT_IO_TIMEOUT_NOW:
+            decodeTimeoutNow(header, &message->timeout_now);
             break;
         default:
             rv = RAFT_IOERR;
@@ -458,10 +509,10 @@ void uvDecodeEntriesBatch(const struct raft_buffer *buf,
 
         entry->buf.base = cursor;
 
-	cursor = (uint8_t*)cursor + entry->buf.len;
+        cursor = (uint8_t *)cursor + entry->buf.len;
         if (entry->buf.len % 8 != 0) {
             /* Add padding */
-            cursor = (uint8_t*)cursor + 8 - (entry->buf.len % 8);
+            cursor = (uint8_t *)cursor + 8 - (entry->buf.len % 8);
         }
     }
 }

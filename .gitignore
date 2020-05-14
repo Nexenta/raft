@@ -23,10 +23,10 @@ stamp-h1
 test/unit/core
 test/unit/uv
 test/integration/core
-test/benchmark/uv
+test/integration/uv
+test/fuzzy/core
 test/*/*.log
 test/*/*.trs
-fuzzy-test*
 os-test*
 test-suite.log
 coverage/
@@ -34,5 +34,7 @@ coverage.info
 TAGS
 example/server
 example/cluster
+benchmark/os-disk-write
 tmp
 conftest*
+doc/build

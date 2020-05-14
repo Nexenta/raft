@@ -1,20 +1,20 @@
 #include "../include/raft.h"
-
 #include "assert.h"
 #include "configuration.h"
+#include "err.h"
 #include "log.h"
-#include "logging.h"
 #include "membership.h"
 #include "progress.h"
 #include "queue.h"
 #include "replication.h"
 #include "request.h"
+#include "tracing.h"
 
 /* Set to 1 to enable tracing. */
 #if 0
-#define tracef(MSG, ...) debugf(r, "apply: " MSG, __VA_ARGS__)
+#define tracef(...) Tracef(r->tracer, __VA_ARGS__)
 #else
-#define tracef(MSG, ...)
+#define tracef(...)
 #endif
 
 int raft_apply(struct raft *r,
@@ -30,8 +30,9 @@ int raft_apply(struct raft *r,
     assert(bufs != NULL);
     assert(n > 0);
 
-    if (r->state != RAFT_LEADER) {
+    if (r->state != RAFT_LEADER || r->transfer != NULL) {
         rv = RAFT_NOTLEADER;
+        ErrMsgFromCode(r->errmsg, rv);
         goto err;
     }
 
@@ -71,7 +72,7 @@ int raft_barrier(struct raft *r, struct raft_barrier *req, raft_barrier_cb cb)
     struct raft_buffer buf;
     int rv;
 
-    if (r->state != RAFT_LEADER) {
+    if (r->state != RAFT_LEADER || r->transfer != NULL) {
         rv = RAFT_NOTLEADER;
         goto err;
     }
@@ -115,13 +116,16 @@ err:
     return rv;
 }
 
-static int changeConfiguration(struct raft *r,
-                               struct raft_change *req,
-                               const struct raft_configuration *configuration)
+static int clientChangeConfiguration(
+    struct raft *r,
+    struct raft_change *req,
+    const struct raft_configuration *configuration)
 {
     raft_index index;
     raft_term term = r->current_term;
     int rv;
+
+    (void)req;
 
     /* Index of the entry being appended. */
     index = logLastIndex(&r->log) + 1;
@@ -145,10 +149,6 @@ static int changeConfiguration(struct raft *r,
         r->configuration = *configuration;
     }
 
-    req->type = RAFT_CHANGE;
-    req->index = index;
-    QUEUE_PUSH(&r->leader_state.requests, &req->queue);
-
     /* Start writing the new log entry to disk and send it to the followers. */
     rv = replicationTrigger(r, index);
     if (rv != 0) {
@@ -170,7 +170,7 @@ err:
 
 int raft_add(struct raft *r,
              struct raft_change *req,
-             unsigned id,
+             raft_id id,
              const char *address,
              raft_change_cb cb)
 {
@@ -191,14 +191,14 @@ int raft_add(struct raft *r,
         goto err;
     }
 
-    rv = raft_configuration_add(&configuration, id, address, false);
+    rv = raft_configuration_add(&configuration, id, address, RAFT_SPARE);
     if (rv != 0) {
         goto err_after_configuration_copy;
     }
 
     req->cb = cb;
 
-    rv = changeConfiguration(r, req, &configuration);
+    rv = clientChangeConfiguration(r, req, &configuration);
     if (rv != 0) {
         goto err_after_configuration_copy;
     }
@@ -215,31 +215,55 @@ err:
     return rv;
 }
 
-int raft_promote(struct raft *r,
-                 struct raft_change *req,
-                 unsigned id,
-                 raft_change_cb cb)
+int raft_assign(struct raft *r,
+                struct raft_change *req,
+                raft_id id,
+                int role,
+                raft_change_cb cb)
 {
     const struct raft_server *server;
-    size_t server_index;
+    unsigned server_index;
     raft_index last_index;
     int rv;
+
+    if (role != RAFT_STANDBY && role != RAFT_VOTER && role != RAFT_SPARE) {
+        rv = RAFT_BADROLE;
+        ErrMsgFromCode(r->errmsg, rv);
+        return rv;
+    }
 
     rv = membershipCanChangeConfiguration(r);
     if (rv != 0) {
         return rv;
     }
 
-    debugf(r, "promote server: id %d", id);
-
     server = configurationGet(&r->configuration, id);
     if (server == NULL) {
-        rv = RAFT_BADID;
+        rv = RAFT_NOTFOUND;
+        ErrMsgPrintf(r->errmsg, "no server has ID %llu", id);
         goto err;
     }
 
-    if (server->voting) {
-        rv = RAFT_ALREADYVOTING;
+    /* Check if we have already the desired role. */
+    if (server->role == role) {
+        const char *name;
+        rv = RAFT_BADROLE;
+        switch (role) {
+            case RAFT_VOTER:
+                name = "voter";
+                break;
+            case RAFT_STANDBY:
+                name = "stand-by";
+                break;
+            case RAFT_SPARE:
+                name = "spare";
+                break;
+            default:
+                name = NULL;
+                assert(0);
+                break;
+        }
+        ErrMsgPrintf(r->errmsg, "server is already %s", name);
         goto err;
     }
 
@@ -253,14 +277,17 @@ int raft_promote(struct raft *r,
     assert(r->leader_state.change == NULL);
     r->leader_state.change = req;
 
-    /* If the log of this non-voting server is already up-to-date, we can ask
-     * its promotion immediately. */
-    if (progressMatchIndex(r, server_index) == last_index) {
-        r->configuration.servers[server_index].voting = true;
+    /* If we are not promoting to the voter role or if the log of this server is
+     * already up-to-date, we can submit the configuration change
+     * immediately. */
+    if (role != RAFT_VOTER ||
+        progressMatchIndex(r, server_index) == last_index) {
+        int old_role = r->configuration.servers[server_index].role;
+        r->configuration.servers[server_index].role = role;
 
-        rv = changeConfiguration(r, req, &r->configuration);
+        rv = clientChangeConfiguration(r, req, &r->configuration);
         if (rv != 0) {
-            r->configuration.servers[server_index].voting = false;
+            r->configuration.servers[server_index].role = old_role;
             return rv;
         }
 
@@ -278,7 +305,7 @@ int raft_promote(struct raft *r,
     rv = replicationProgress(r, server_index);
     if (rv != 0 && rv != RAFT_NOCONNECTION) {
         /* This error is not fatal. */
-        debugf(r, "failed to send append entries to server %ld: %s (%d)",
+        tracef("failed to send append entries to server %u: %s (%d)",
                server->id, raft_strerror(rv), rv);
     }
 
@@ -286,13 +313,12 @@ int raft_promote(struct raft *r,
 
 err:
     assert(rv != 0);
-
     return rv;
 }
 
 int raft_remove(struct raft *r,
                 struct raft_change *req,
-                unsigned id,
+                raft_id id,
                 raft_change_cb cb)
 {
     const struct raft_server *server;
@@ -310,7 +336,7 @@ int raft_remove(struct raft *r,
         goto err;
     }
 
-    debugf(r, "remove server: id %d", id);
+    tracef("remove server: id %d", id);
 
     /* Make a copy of the current configuration, and remove the given server
      * from it. */
@@ -326,7 +352,7 @@ int raft_remove(struct raft *r,
 
     req->cb = cb;
 
-    rv = changeConfiguration(r, req, &configuration);
+    rv = clientChangeConfiguration(r, req, &configuration);
     if (rv != 0) {
         goto err_after_configuration_copy;
     }
@@ -343,3 +369,82 @@ err:
     assert(rv != 0);
     return rv;
 }
+
+/* Find a suitable voting follower. */
+static raft_id clientSelectTransferee(struct raft *r)
+{
+    const struct raft_server *transferee = NULL;
+    unsigned i;
+
+    for (i = 0; i < r->configuration.n; i++) {
+        const struct raft_server *server = &r->configuration.servers[i];
+        if (server->id == r->id || server->role != RAFT_VOTER) {
+            continue;
+        }
+        transferee = server;
+        if (progressIsUpToDate(r, i)) {
+            break;
+        }
+    }
+
+    if (transferee != NULL) {
+        return transferee->id;
+    }
+
+    return 0;
+}
+
+int raft_transfer(struct raft *r,
+                  struct raft_transfer *req,
+                  raft_id id,
+                  raft_transfer_cb cb)
+{
+    const struct raft_server *server;
+    unsigned i;
+    int rv;
+
+    if (r->state != RAFT_LEADER || r->transfer != NULL) {
+        rv = RAFT_NOTLEADER;
+        ErrMsgFromCode(r->errmsg, rv);
+        goto err;
+    }
+
+    if (id == 0) {
+        id = clientSelectTransferee(r);
+        if (id == 0) {
+            rv = RAFT_NOTFOUND;
+            ErrMsgPrintf(r->errmsg, "there's no other voting server");
+            goto err;
+        }
+    }
+
+    server = configurationGet(&r->configuration, id);
+    if (server == NULL || server->id == r->id || server->role != RAFT_VOTER) {
+        rv = RAFT_BADID;
+        ErrMsgFromCode(r->errmsg, rv);
+        goto err;
+    }
+
+    /* If this follower is up-to-date, we can send it the TimeoutNow message
+     * right away. */
+    i = configurationIndexOf(&r->configuration, server->id);
+    assert(i < r->configuration.n);
+
+    membershipLeadershipTransferInit(r, req, id, cb);
+
+    if (progressIsUpToDate(r, i)) {
+        rv = membershipLeadershipTransferStart(r);
+        if (rv != 0) {
+            r->transfer = NULL;
+            goto err;
+        }
+    }
+
+    return 0;
+
+err:
+    assert(rv != 0);
+    return rv;
+}
+
+#undef tracef

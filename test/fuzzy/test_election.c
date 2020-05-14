@@ -1,8 +1,6 @@
 #include "../lib/cluster.h"
 #include "../lib/runner.h"
 
-TEST_MODULE(election)
-
 /******************************************************************************
  *
  * Fixture
@@ -21,10 +19,9 @@ static MunitParameterEnum _params[] = {
     {NULL, NULL},
 };
 
-static void *setup(const MunitParameter params[], void *user_data)
+static void *setup(const MunitParameter params[], MUNIT_UNUSED void *user_data)
 {
     struct fixture *f = munit_malloc(sizeof *f);
-    (void)user_data;
     SETUP_CLUSTER(0);
     CLUSTER_BOOTSTRAP;
     CLUSTER_RANDOMIZE;
@@ -45,24 +42,20 @@ static void tear_down(void *data)
  *
  *****************************************************************************/
 
-TEST_SUITE(run)
-TEST_SETUP(run, setup)
-TEST_TEAR_DOWN(run, tear_down)
+SUITE(election)
 
 /* A leader is eventually elected */
-TEST_CASE(run, win, _params)
+TEST(election, win, setup, tear_down, 0, _params)
 {
     struct fixture *f = data;
-    (void)params;
     CLUSTER_STEP_UNTIL_HAS_LEADER(10000);
     return MUNIT_OK;
 }
 
 /* A new leader is elected if the current one dies. */
-TEST_CASE(run, change, _params)
+TEST(election, change, setup, tear_down, 0, _params)
 {
     struct fixture *f = data;
-    (void)params;
     CLUSTER_STEP_UNTIL_HAS_LEADER(10000);
     CLUSTER_KILL_LEADER;
     CLUSTER_STEP_UNTIL_HAS_NO_LEADER(10000);
@@ -71,10 +64,9 @@ TEST_CASE(run, change, _params)
 }
 
 /* If no majority of servers is online, no leader is elected. */
-TEST_CASE(run, no_quorum, _params)
+TEST(election, noQuorum, setup, tear_down, 0, _params)
 {
     struct fixture *f = data;
-    (void)params;
     CLUSTER_KILL_MAJORITY;
     CLUSTER_STEP_UNTIL_ELAPSED(30000);
     munit_assert_false(CLUSTER_HAS_LEADER);

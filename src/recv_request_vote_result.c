@@ -1,21 +1,22 @@
 #include "recv_request_vote_result.h"
+
 #include "assert.h"
 #include "configuration.h"
 #include "convert.h"
 #include "election.h"
-#include "logging.h"
 #include "recv.h"
 #include "replication.h"
+#include "tracing.h"
 
 /* Set to 1 to enable tracing. */
 #if 0
-#define tracef(...) debugf(r, __VA_ARGS__)
+#define tracef(...) Tracef(r->tracer, __VA_ARGS__)
 #else
 #define tracef(...)
 #endif
 
 int recvRequestVoteResult(struct raft *r,
-                          unsigned id,
+                          raft_id id,
                           const char *address,
                           const struct raft_request_vote_result *result)
 {
@@ -28,9 +29,9 @@ int recvRequestVoteResult(struct raft *r,
     assert(r != NULL);
     assert(id > 0);
 
-    votes_index = configurationIndexOfVoting(&r->configuration, id);
+    votes_index = configurationIndexOfVoter(&r->configuration, id);
     if (votes_index == r->configuration.n) {
-        infof(r, "non-voting or unknown server -> reject");
+        tracef("non-voting or unknown server -> reject");
         return 0;
     }
 
@@ -65,7 +66,7 @@ int recvRequestVoteResult(struct raft *r,
      *
      *   [candidate]: receives votes from majority of servers -> [leader]
      *
-     * From Section §3.4:
+     * From Section 3.4:
      *
      *   A candidate wins an election if it receives votes from a majority of
      *   the servers in the full cluster for the same term. Each server will
@@ -75,7 +76,7 @@ int recvRequestVoteResult(struct raft *r,
      */
     if (result->vote_granted) {
         if (electionTally(r, votes_index)) {
-            infof(r, "votes quorum reached -> convert to leader");
+            tracef("votes quorum reached -> convert to leader");
             rv = convertToLeader(r);
             if (rv != 0) {
                 return rv;
@@ -91,3 +92,5 @@ int recvRequestVoteResult(struct raft *r,
 
     return 0;
 }
+
+#undef tracef

@@ -16,7 +16,7 @@ int membershipCanChangeConfiguration(struct raft *r);
  * Return false if the server being promoted did not yet catch-up with logs, and
  * true if it did.
  *
- * This function must be called only by leaders after a @raft_promote request
+ * This function must be called only by leaders after a @raft_assign request
  * has been submitted. */
 bool membershipUpdateCatchUpRound(struct raft *r);
 
@@ -35,5 +35,19 @@ int membershipUncommittedChange(struct raft *r,
  * AppendEntries RPC request that instructs them to evict the uncomitted entry
  * from their log. */
 int membershipRollback(struct raft *r);
+
+/* Initialize the state of a leadership transfer request. */
+void membershipLeadershipTransferInit(struct raft *r,
+				      struct raft_transfer *req,
+                                      raft_id id,
+                                      raft_transfer_cb cb);
+
+/* Start the leadership transfer by sending a TimeoutNow message to the target
+ * server. */
+int membershipLeadershipTransferStart(struct raft *r);
+
+/* Finish a leadership transfer (whether successful or not), resetting the
+ * leadership tranfer state and firing the user callback. */
+void membershipLeadershipTransferClose(struct raft *r);
 
 #endif /* MEMBERSHIP_H_ */

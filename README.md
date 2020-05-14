@@ -1,4 +1,4 @@
-[![Build Status](https://travis-ci.org/canonical/raft.png)](https://travis-ci.org/canonical/raft) [![codecov](https://codecov.io/gh/canonical/raft/branch/master/graph/badge.svg)](https://codecov.io/gh/canonical/raft)
+[![Build Status](https://travis-ci.org/canonical/raft.png)](https://travis-ci.org/canonical/raft) [![codecov](https://codecov.io/gh/canonical/raft/branch/master/graph/badge.svg)](https://codecov.io/gh/canonical/raft) [![Documentation Status](https://readthedocs.org/projects/raft/badge/?version=latest)](https://raft.readthedocs.io/en/latest/?badge=latest)
 
 Fully asynchronous C implementation of the Raft consensus protocol.
 
@@ -16,6 +16,14 @@ I/O. Patches are welcome to add support for more platforms.
 
 See [raft.h](https://github.com/canonical/raft/blob/master/include/raft.h) for full documentation.
 
+Licence
+-------
+
+This raft C library is released under a slightly modified version of LGPLv3,
+that includes a copiright exception letting users to statically link the library
+code in their project and release the final work under their own terms. See the
+full [license](https://github.com/canonical/raft/blob/LICENSE) text.
+
 Features
 --------
 
@@ -32,6 +40,7 @@ It also includes a few optional enhancements:
 - Optimistic pipelining to reduce log replication latency
 - Writing to leader's disk in parallel
 - Automatic stepping down when the leader loses quorum
+- Leadership transfer extension
 
 Building
 --------
@@ -92,27 +101,13 @@ struct raft_fsm
 }
 ```
 
-Create an instance of the stock ```raft_logger``` interface implementation:
-
-```C
-struct raft_logger logger;
-raft_stream_logger_init (&logger, stdout);
-```
-
-or
-
-```C
-struct raft_logger logger;
-raft_ring_logger_init (&logger, buffer_size);
-```
-
 Pick a unique ID and address for each server and initialize the raft object:
 
 ```C
 unsigned id = 1;
 const char *address = "192.168.1.1:9999";
 struct raft raft;
-raft_init(&raft, &io, &fsm, &logger, id, address);
+raft_init(&raft, &io, &fsm, id, address);
 ```
 
 If it's the first time you start the cluster, create a configuration object

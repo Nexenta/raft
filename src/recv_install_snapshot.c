@@ -1,21 +1,29 @@
 #include "recv_install_snapshot.h"
+
 #include "assert.h"
 #include "convert.h"
 #include "log.h"
-#include "logging.h"
 #include "recv.h"
 #include "replication.h"
+#include "tracing.h"
 
-static void sendCb(struct raft_io_send *req, int status)
+/* Set to 1 to enable tracing. */
+#if 0
+#define tracef(...) Tracef(r->tracer, __VA_ARGS__)
+#else
+#define tracef(...)
+#endif
+
+static void installSnapshotSendCb(struct raft_io_send *req, int status)
 {
     (void)status;
     raft_free(req);
 }
 
-int rpcRecvInstallSnapshot(struct raft *r,
-                           const unsigned id,
-                           const char *address,
-                           struct raft_install_snapshot *args)
+int recvInstallSnapshot(struct raft *r,
+                        const raft_id id,
+                        const char *address,
+                        struct raft_install_snapshot *args)
 {
     struct raft_io_send *req;
     struct raft_message message;
@@ -35,7 +43,7 @@ int rpcRecvInstallSnapshot(struct raft *r,
     }
 
     if (match < 0) {
-        debugf(r, "local term is higher -> reject ");
+        tracef("local term is higher -> reject ");
         goto reply;
     }
 
@@ -44,7 +52,7 @@ int rpcRecvInstallSnapshot(struct raft *r,
     assert(r->current_term == args->term);
     if (r->state == RAFT_CANDIDATE) {
         assert(match == 0);
-        debugf(r, "discovered leader -> step down ");
+        tracef("discovered leader -> step down ");
         convertToFollower(r);
     }
 
@@ -83,8 +91,9 @@ reply:
     if (req == NULL) {
         return RAFT_NOMEM;
     }
+    req->data = r;
 
-    rv = r->io->send(r->io, req, &message, sendCb);
+    rv = r->io->send(r->io, req, &message, installSnapshotSendCb);
     if (rv != 0) {
         raft_free(req);
         return rv;
@@ -92,3 +101,5 @@ reply:
 
     return 0;
 }
+
+#undef tracef

@@ -9,7 +9,7 @@ int raft_state(struct raft *r)
     return r->state;
 }
 
-void raft_leader(struct raft *r, unsigned *id, const char **address)
+void raft_leader(struct raft *r, raft_id *id, const char **address)
 {
     switch (r->state) {
         case RAFT_UNAVAILABLE:
@@ -22,9 +22,14 @@ void raft_leader(struct raft *r, unsigned *id, const char **address)
             *address = r->follower_state.current_leader.address;
             return;
         case RAFT_LEADER:
+            if (r->transfer != NULL) {
+                *id = 0;
+                *address = NULL;
+                return;
+            }
             *id = r->id;
             *address = r->address;
-            break;
+            return;
     }
 }
 
@@ -36,9 +41,4 @@ raft_index raft_last_index(struct raft *r)
 raft_index raft_last_applied(struct raft *r)
 {
     return r->last_applied;
-}
-
-void raft_set_logger_level(struct raft *r, unsigned level)
-{
-    r->logger->level = level;
 }

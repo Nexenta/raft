@@ -16,10 +16,16 @@
  *
  * The various file systems must have been previously setup with the fs.sh
  * script. */
-#define TEST_DIR_FS "dir-fs"
+#define DIR_FS_PARAM "dir-fs"
 
 #define FIXTURE_DIR char *dir
-#define SETUP_DIR f->dir = setupDir(params, user_data)
+#define SETUP_DIR f->dir = setUpDir(params, user_data)
+#define SETUP_DIR_OR_SKIP                                            \
+    SETUP_DIR;                                                       \
+    if (f->dir == NULL) { /* Desired fs not available, skip test. */ \
+        free(f);                                                     \
+        return NULL;                                                 \
+    }
 #define TEAR_DOWN_DIR tearDownDir(f->dir)
 
 /* List of all supported file system types. */
@@ -41,72 +47,67 @@ extern char *test_dir_aio[];
 /* List containing all fs types that do not properly support AIO. */
 extern char *test_dir_no_aio[];
 
-/* Contain a single TEST_DIR_FS parameter set to all supported file system
+/* Contain a single DIR_FS_PARAM parameter set to all supported file system
  * types. */
 extern MunitParameterEnum dir_all_params[];
 
-/* Contain a single TEST_DIR_FS parameter set to tmpfs. */
+/* Contain a single DIR_FS_PARAM parameter set to tmpfs. */
 extern MunitParameterEnum dir_tmpfs_params[];
 
-/* Contain a single TEST_DIR_FS parameter set to btrfs. */
+/* Contain a single DIR_FS_PARAM parameter set to btrfs. */
 extern MunitParameterEnum dir_btrfs_params[];
 
-/* Contain a single TEST_DIR_FS parameter set to zfs. */
+/* Contain a single DIR_FS_PARAM parameter set to zfs. */
 extern MunitParameterEnum dir_zfs_params[];
 
-/* Contain a single TEST_DIR_FS parameter set to all file systems with
+/* Contain a single DIR_FS_PARAM parameter set to all file systems with
  * proper AIO support (i.e. NOWAIT works). */
 extern MunitParameterEnum dir_aio_params[];
 
-/* Contain a single TEST_DIR_FS parameter set to all file systems without proper
- * AIO support (i.e. NOWAIT does not work). */
+/* Contain a single DIR_FS_PARAM parameter set to all file systems without
+ * proper AIO support (i.e. NOWAIT does not work). */
 extern MunitParameterEnum dir_no_aio_params[];
 
 /* Create a temporary test directory.
  *
  * Return a pointer the path of the created directory. */
-void *setupDir(const MunitParameter params[], void *user_data);
+void *setUpDir(const MunitParameter params[], void *user_data);
 
 /* Create a temporary test directory backed by tmpfs.
  *
  * Return a pointer the path of the created directory, or NULL if no tmpfs file
  * system is available. */
-void *setupTmpfsDir(const MunitParameter params[], void *user_data);
+void *setUpTmpfsDir(const MunitParameter params[], void *user_data);
 
 /* Create a temporary test directory backed by ext4.
  *
  * Return a pointer the path of the created directory, or NULL if no ext4 file
  * system is available. */
-void *setupExt4Dir(const MunitParameter params[], void *user_data);
+void *setUpExt4Dir(const MunitParameter params[], void *user_data);
 
 /* Create a temporary test directory backed by btrfs.
  *
  * Return a pointer the path of the created directory, or NULL if no btrfs file
  * system is available. */
-void *setupBtrfsDir(const MunitParameter params[], void *user_data);
+void *setUpBtrfsDir(const MunitParameter params[], void *user_data);
 
 /* Create a temporary test directory backed by zfs.
  *
  * Return a pointer the path of the created directory, or NULL if no zfs file
  * system is available. */
-void *setupZfsDir(const MunitParameter params[], void *user_data);
+void *setUpZfsDir(const MunitParameter params[], void *user_data);
 
 /* Create a temporary test directory backed by xfs.
  *
  * Return a pointer the path of the created directory, or NULL if no xfs file
  * system is available. */
-void *setupXfsDir(const MunitParameter params[], void *user_data);
+void *setUpXfsDir(const MunitParameter params[], void *user_data);
 
 /* Recursively remove a temporary directory. */
 void tearDownDir(void *data);
 
-/* Create a temporary test directory backed by the file system specified in the
- * TEST_DIR_FS parameter. If no parameter is given the default is to use
- * tmpfs. */
-char *test_dir_setup(const MunitParameter params[]);
-
 /* Recursively remove a temporary directory. */
-void test_dir_tear_down(char *dir);
+void test_dir_remove(char *dir);
 
 /* Write the given @buf to the given @filename in the given @dir. */
 void test_dir_write_file(const char *dir,
@@ -148,6 +149,17 @@ void test_dir_truncate_file(const char *dir,
                             const char *filename,
                             const size_t n);
 
+/* Grow the given file to the given size, filling the new bytes with zeros. */
+void test_dir_grow_file(const char *dir, const char *filename, const size_t n);
+
+/* Rename a file in the given directory from filename1 to filename2. */
+void test_dir_rename_file(const char *dir,
+                          const char *filename1,
+                          const char *filename2);
+
+/* Remove a file. */
+void test_dir_remove_file(const char *dir, const char *filename);
+
 /* Read into @buf the content of the given @filename in the given @dir. */
 void test_dir_read_file(const char *dir,
                         const char *filename,
@@ -159,6 +171,9 @@ bool test_dir_exists(const char *dir);
 
 /* Make the given directory not executable, so files can't be open. */
 void test_dir_unexecutable(const char *dir);
+
+/* Make the given directory not writable. */
+void test_dir_unwritable(const char *dir);
 
 /* Make the given file not readable. */
 void test_dir_unreadable_file(const char *dir, const char *filename);
@@ -172,8 +187,12 @@ void test_dir_fill(const char *dir, const size_t n);
 
 /* Fill the AIO subsystem resources by allocating a lot of events to the given
  * context, and leaving only @n events available for subsequent calls to
- * @io_setup. */
-void test_aio_fill(aio_context_t *ctx, unsigned n);
+ * @io_setup.
+ *
+ * Return -1 if it looks like there is another process already using the AIO
+ * subsytem, which would most probably make the calling test flaky because there
+ * won't be exactly @n events available anymore. */
+int test_aio_fill(aio_context_t *ctx, unsigned n);
 
 /* Destroy the given AIO context. */
 void test_aio_destroy(aio_context_t ctx);

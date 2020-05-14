@@ -1,12 +1,13 @@
 #include "progress.h"
+
 #include "assert.h"
 #include "configuration.h"
 #include "log.h"
-#include "logging.h"
+#include "tracing.h"
 
 /* Set to 1 to enable tracing. */
 #if 0
-#define tracef(...) debugf(r, ##__VA_ARGS__)
+#define tracef(...) Tracef(r->tracer, __VA_ARGS__)
 #else
 #define tracef(...)
 #endif
@@ -56,7 +57,7 @@ int progressRebuildArray(struct raft *r,
     struct raft_progress *progress;
     unsigned i;
     unsigned j;
-    unsigned id;
+    raft_id id;
 
     progress = raft_malloc(configuration->n * sizeof *progress);
     if (progress == NULL) {
@@ -97,14 +98,20 @@ int progressRebuildArray(struct raft *r,
     return 0;
 }
 
+bool progressIsUpToDate(struct raft *r, unsigned i)
+{
+    struct raft_progress *p = &r->leader_state.progress[i];
+    raft_index last_index = logLastIndex(&r->log);
+    return p->next_index == last_index + 1;
+}
+
 bool progressShouldReplicate(struct raft *r, unsigned i)
 {
     struct raft_progress *p = &r->leader_state.progress[i];
     raft_time now = r->io->time(r->io);
     bool needs_heartbeat = now - p->last_send >= r->heartbeat_timeout;
     raft_index last_index = logLastIndex(&r->log);
-    bool is_up_to_date = p->next_index == last_index + 1;
-    bool result;
+    bool result = false;
 
     /* We must be in a valid state. */
     assert(p->state == PROGRESS__PROBE || p->state == PROGRESS__PIPELINE ||
@@ -129,7 +136,7 @@ bool progressShouldReplicate(struct raft *r, unsigned i)
         case PROGRESS__PIPELINE:
             /* In replication mode we send empty append entries messages only if
              * haven't sent anything in the last heartbeat interval. */
-            result = !is_up_to_date || needs_heartbeat;
+            result = !progressIsUpToDate(r, i) || needs_heartbeat;
             break;
     }
     return result;
@@ -248,10 +255,6 @@ bool progressMaybeUpdate(struct raft *r, unsigned i, raft_index last_index)
     if (p->next_index < last_index + 1) {
         p->next_index = last_index + 1;
     }
-    if (updated) {
-        tracef("new match/next idx for server %ld: %ld/%ld", server->id,
-               p->match_index, p->next_index);
-    }
     return updated;
 }
 
@@ -284,3 +287,5 @@ bool progressSnapshotDone(struct raft *r, const unsigned i)
     assert(p->state == PROGRESS__SNAPSHOT);
     return p->match_index >= p->snapshot_index;
 }
+
+#undef tracef

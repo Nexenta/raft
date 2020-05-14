@@ -1,40 +1,40 @@
 #include "recv.h"
+
 #include "assert.h"
 #include "convert.h"
 #include "entry.h"
+#include "heap.h"
 #include "log.h"
-#include "logging.h"
+#include "membership.h"
 #include "recv_append_entries.h"
 #include "recv_append_entries_result.h"
 #include "recv_install_snapshot.h"
 #include "recv_request_vote.h"
 #include "recv_request_vote_result.h"
+#include "recv_timeout_now.h"
 #include "string.h"
-
-static const char *message_descs[] = {"append entries", "append entries result",
-                                      "request vote", "request vote result",
-                                      "install snapshot"};
+#include "tracing.h"
 
 /* Set to 1 to enable tracing. */
 #if 0
-#define tracef(MSG, ...) debugf(r, "recv: " MSG, ##__VA_ARGS__)
+#define tracef(...) Tracef(r->tracer, __VA_ARGS__)
 #else
-#define tracef(MSG, ...)
+#define tracef(...)
 #endif
 
 /* Dispatch a single RPC message to the appropriate handler. */
-static int recv(struct raft *r, struct raft_message *message)
+static int recvMessage(struct raft *r, struct raft_message *message)
 {
     int rv = 0;
 
     if (message->type < RAFT_IO_APPEND_ENTRIES ||
-        message->type > RAFT_IO_INSTALL_SNAPSHOT) {
-        warnf(r, "received unknown message type type: %d", message->type);
+        message->type > RAFT_IO_TIMEOUT_NOW) {
+        tracef("received unknown message type type: %d", message->type);
         return 0;
     }
 
-    tracef("%s from server %ld", message_descs[message->type - 1],
-           message->server_id);
+    /* tracef("%s from server %ld", message_descs[message->type - 1],
+       message->server_id); */
 
     switch (message->type) {
         case RAFT_IO_APPEND_ENTRIES:
@@ -61,17 +61,30 @@ static int recv(struct raft *r, struct raft_message *message)
                                        &message->request_vote_result);
             break;
         case RAFT_IO_INSTALL_SNAPSHOT:
-            rv = rpcRecvInstallSnapshot(r, message->server_id,
-                                        message->server_address,
-                                        &message->install_snapshot);
+            rv = recvInstallSnapshot(r, message->server_id,
+                                     message->server_address,
+                                     &message->install_snapshot);
+            break;
+        case RAFT_IO_TIMEOUT_NOW:
+            rv = recvTimeoutNow(r, message->server_id, message->server_address,
+                                &message->timeout_now);
             break;
     };
 
     if (rv != 0 && rv != RAFT_NOCONNECTION) {
-        errorf(r, "recv: %s: %s", message_descs[message->type - 1],
-               raft_strerror(rv));
+        /* tracef("recv: %s: %s", message_descs[message->type - 1],
+                 raft_strerror(rv)); */
         return rv;
     }
+
+    /* If there's a leadership transfer in progress, check if it has
+     * completed. */
+    if (r->transfer != NULL) {
+        if (r->follower_state.current_leader.id == r->transfer->id) {
+            membershipLeadershipTransferClose(r);
+        }
+    }
+
     return 0;
 }
 
@@ -87,12 +100,12 @@ void recvCb(struct raft_io *io, struct raft_message *message)
                 break;
             case RAFT_IO_INSTALL_SNAPSHOT:
                 raft_configuration_close(&message->install_snapshot.conf);
-		raft_free(message->install_snapshot.data.base);
+                raft_free(message->install_snapshot.data.base);
                 break;
         }
         return;
     }
-    rv = recv(r, message);
+    rv = recvMessage(r, message);
     if (rv != 0) {
         convertToUnavailable(r);
     }
@@ -141,13 +154,13 @@ int recvEnsureMatchingTerms(struct raft *r, raft_term term, int *match)
      *
      *   [leader]: discovers server with higher term -> [follower]
      *
-     * From Section §3.3:
+     * From Section 3.3:
      *
      *   If a candidate or leader discovers that its term is out of date, it
      *   immediately reverts to follower state.
      */
     if (term > r->current_term) {
-        char msg[1204];
+        char msg[128];
         sprintf(msg, "remote term %lld is higher than %lld -> bump local term",
                 term, r->current_term);
         if (r->state != RAFT_FOLLOWER) {
@@ -170,28 +183,29 @@ int recvEnsureMatchingTerms(struct raft *r, raft_term term, int *match)
     return 0;
 }
 
-static void copyAddress(const char *address1, char **address2)
-{
-    *address2 = raft_malloc(strlen(address1) + 1);
-    if (*address2 == NULL) {
-        return;
-    }
-    strcpy(*address2, address1);
-}
-
-int recvUpdateLeader(struct raft *r, unsigned id, const char *address)
+int recvUpdateLeader(struct raft *r, const raft_id id, const char *address)
 {
     assert(r->state == RAFT_FOLLOWER);
+
     r->follower_state.current_leader.id = id;
-    if (r->follower_state.current_leader.address == NULL ||
-        strcmp(address, r->follower_state.current_leader.address) != 0) {
-        if (r->follower_state.current_leader.address != NULL) {
-            raft_free(r->follower_state.current_leader.address);
-        }
-        copyAddress(address, &r->follower_state.current_leader.address);
-        if (r->follower_state.current_leader.address == NULL) {
-            return RAFT_NOMEM;
-        }
+
+    /* If the address of the current leader is the same as the given one, we're
+     * done. */
+    if (r->follower_state.current_leader.address != NULL &&
+        strcmp(address, r->follower_state.current_leader.address) == 0) {
+        return 0;
     }
+
+    if (r->follower_state.current_leader.address != NULL) {
+        HeapFree(r->follower_state.current_leader.address);
+    }
+    r->follower_state.current_leader.address = HeapMalloc(strlen(address) + 1);
+    if (r->follower_state.current_leader.address == NULL) {
+        return RAFT_NOMEM;
+    }
+    strcpy(r->follower_state.current_leader.address, address);
+
     return 0;
 }
+
+#undef tracef

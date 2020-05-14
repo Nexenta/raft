@@ -1,26 +1,28 @@
 #include "recv_append_entries.h"
+
 #include "assert.h"
 #include "convert.h"
+#include "heap.h"
 #include "log.h"
-#include "logging.h"
 #include "recv.h"
 #include "replication.h"
+#include "tracing.h"
 
 /* Set to 1 to enable tracing. */
 #if 0
-#define tracef(...) debugf(r, ##__VA_ARGS__)
+#define tracef(...) Tracef(r->tracer, __VA_ARGS__)
 #else
 #define tracef(...)
 #endif
 
-static void sendCb(struct raft_io_send *req, int status)
+static void recvSendAppendEntriesResultCb(struct raft_io_send *req, int status)
 {
     (void)status;
-    raft_free(req);
+    HeapFree(req);
 }
 
 int recvAppendEntries(struct raft *r,
-                      const unsigned id,
+                      raft_id id,
                       const char *address,
                       const struct raft_append_entries *args)
 {
@@ -63,14 +65,14 @@ int recvAppendEntries(struct raft *r,
      *   Rules for Servers: Candidates: if AppendEntries RPC is received from
      *   new leader: convert to follower.
      *
-     * From Section §3.4:
+     * From Section 3.4:
      *
      *   While waiting for votes, a candidate may receive an AppendEntries RPC
-     *   from another server claiming to be leader. If the leader’s term
-     *   (included in its RPC) is at least as large as the candidate’s current
+     *   from another server claiming to be leader. If the leader's term
+     *   (included in its RPC) is at least as large as the candidate's current
      *   term, then the candidate recognizes the leader as legitimate and
      *   returns to follower state. If the term in the RPC is smaller than the
-     *   candidate’s current term, then the candidate rejects the RPC and
+     *   candidate's current term, then the candidate rejects the RPC and
      *   continues in candidate state.
      *
      * From state diagram in Figure 3.3:
@@ -90,7 +92,7 @@ int recvAppendEntries(struct raft *r,
         /* The current term and the peer one must match, otherwise we would have
          * either rejected the request or stepped down to followers. */
         assert(match == 0);
-        debugf(r, "discovered leader -> step down ");
+        tracef("discovered leader -> step down ");
         convertToFollower(r);
     }
 
@@ -141,12 +143,13 @@ reply:
     message.server_id = id;
     message.server_address = address;
 
-    req = raft_malloc(sizeof *req);
+    req = HeapMalloc(sizeof *req);
     if (req == NULL) {
         return RAFT_NOMEM;
     }
+    req->data = r;
 
-    rv = r->io->send(r->io, req, &message, sendCb);
+    rv = r->io->send(r->io, req, &message, recvSendAppendEntriesResultCb);
     if (rv != 0) {
         raft_free(req);
         return rv;
@@ -154,3 +157,5 @@ reply:
 
     return 0;
 }
+
+#undef tracef

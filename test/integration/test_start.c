@@ -1,52 +1,70 @@
 #include "../lib/cluster.h"
 #include "../lib/runner.h"
 
-TEST_MODULE(start)
-
 /******************************************************************************
  *
- * Start with a snapshot present on disk.
+ * Fixture with a fake raft_io instance.
  *
  *****************************************************************************/
 
-struct snapshot_fixture
+struct fixture
 {
     FIXTURE_CLUSTER;
 };
 
-TEST_SUITE(snapshot)
+/******************************************************************************
+ *
+ * Helper macros
+ *
+ *****************************************************************************/
 
-TEST_SETUP(snapshot)
+/* Bootstrap the I'th server. */
+#define BOOTSTRAP(I)                                  \
+    do {                                              \
+        struct raft_configuration _configuration;     \
+        int _rv;                                      \
+        struct raft *_raft;                           \
+        CLUSTER_CONFIGURATION(&_configuration);       \
+        _raft = CLUSTER_RAFT(I);                      \
+        _rv = raft_bootstrap(_raft, &_configuration); \
+        munit_assert_int(_rv, ==, 0);                 \
+        raft_configuration_close(&_configuration);    \
+    } while (0)
+
+/******************************************************************************
+ *
+ * Set up a cluster with a single server.
+ *
+ *****************************************************************************/
+
+static void *setUp(const MunitParameter params[], MUNIT_UNUSED void *user_data)
 {
-    struct snapshot_fixture *f = munit_malloc(sizeof *f);
-    struct raft_configuration configuration;
-    struct raft *raft;
-    int rv;
-    (void)user_data;
-    SETUP_CLUSTER(2);
-
-    /* Bootstrap the second server. */
-    CLUSTER_CONFIGURATION(&configuration);
-    raft = CLUSTER_RAFT(1);
-    rv = raft_bootstrap(raft, &configuration);
-    munit_assert_int(rv, ==, 0);
-    raft_configuration_close(&configuration);
-
+    struct fixture *f = munit_malloc(sizeof *f);
+    SETUP_CLUSTER(1);
     return f;
 }
 
-TEST_TEAR_DOWN(snapshot)
+static void tearDown(void *data)
 {
-    struct snapshot_fixture *f = data;
+    struct fixture *f = data;
     TEAR_DOWN_CLUSTER;
     free(f);
 }
 
-/* Only the snapshot is present and no other entries. */
-TEST_CASE(snapshot, no_entries, NULL)
+/******************************************************************************
+ *
+ * raft_start
+ *
+ *****************************************************************************/
+
+SUITE(raft_start)
+
+/* There are two servers. The first has a snapshot present and no other
+ * entries. */
+TEST(raft_start, oneSnapshotAndNoEntries, setUp, tearDown, 0, NULL)
 {
-    struct snapshot_fixture *f = data;
-    (void)params;
+    struct fixture *f = data;
+    CLUSTER_GROW;
     CLUSTER_SET_SNAPSHOT(0 /* server index                                  */,
                          6 /* last index                                    */,
                          2 /* last term                                     */,
@@ -54,18 +72,22 @@ TEST_CASE(snapshot, no_entries, NULL)
                          5 /* x                                             */,
                          7 /* y                                             */);
     CLUSTER_SET_TERM(0, 2);
+    BOOTSTRAP(1);
     CLUSTER_START;
     CLUSTER_MAKE_PROGRESS;
     return MUNIT_OK;
 }
 
-/* There's a snapshot along with some follow-up entries. */
-TEST_CASE(snapshot, followup_entries, NULL)
+/* There are two servers. The first has a snapshot along with some follow-up
+ * entries. */
+TEST(raft_start, oneSnapshotAndSomeFollowUpEntries, setUp, tearDown, 0, NULL)
 {
-    struct snapshot_fixture *f = data;
+    struct fixture *f = data;
     struct raft_entry entries[2];
     struct raft_fsm *fsm;
-    (void)params;
+
+    CLUSTER_GROW;
+    BOOTSTRAP(1);
 
     entries[0].type = RAFT_COMMAND;
     entries[0].term = 2;
@@ -84,6 +106,7 @@ TEST_CASE(snapshot, followup_entries, NULL)
     CLUSTER_ADD_ENTRY(0, &entries[0]);
     CLUSTER_ADD_ENTRY(1, &entries[1]);
     CLUSTER_SET_TERM(0, 2);
+
     CLUSTER_START;
     CLUSTER_MAKE_PROGRESS;
 
@@ -99,63 +122,36 @@ TEST_CASE(snapshot, followup_entries, NULL)
  *
  *****************************************************************************/
 
-struct entries_fixture
+/* There are 3 servers. The first has no entries are present at all */
+TEST(raft_start, noEntries, setUp, tearDown, 0, NULL)
 {
-    FIXTURE_CLUSTER;
-    struct raft_configuration configuration;
-};
-
-TEST_SUITE(entries)
-
-TEST_SETUP(entries)
-{
-    struct entries_fixture *f = munit_malloc(sizeof *f);
-    struct raft *raft;
-    unsigned i;
-    int rc;
-    (void)user_data;
-    SETUP_CLUSTER(3);
-
-    /* Bootstrap the second and third server. */
-    CLUSTER_CONFIGURATION(&f->configuration);
-    for (i = 0; i < 2; i++) {
-        raft = CLUSTER_RAFT(i + 1);
-        rc = raft_bootstrap(raft, &f->configuration);
-        munit_assert_int(rc, ==, 0);
-    }
-    return f;
-}
-
-TEST_TEAR_DOWN(entries)
-{
-    struct entries_fixture *f = data;
-    raft_configuration_close(&f->configuration);
-    TEAR_DOWN_CLUSTER;
-    free(f);
-}
-
-/* No entries are present at all */
-TEST_CASE(entries, empty, NULL)
-{
-    struct entries_fixture *f = data;
-    (void)params;
+    struct fixture *f = data;
+    CLUSTER_GROW;
+    CLUSTER_GROW;
+    BOOTSTRAP(1);
+    BOOTSTRAP(2);
     CLUSTER_START;
     CLUSTER_MAKE_PROGRESS;
     return MUNIT_OK;
 }
 
-/* Two entries are present. */
-TEST_CASE(entries, two, NULL)
+/* There are 3 servers, the first has some entries, the others don't. */
+TEST(raft_start, twoEntries, setUp, tearDown, 0, NULL)
 {
-    struct entries_fixture *f = data;
+    struct fixture *f = data;
+    struct raft_configuration configuration;
     struct raft_entry entry;
     struct raft_fsm *fsm;
     unsigned i;
     int rv;
-    (void)params;
 
-    rv = raft_bootstrap(CLUSTER_RAFT(0), &f->configuration);
+    CLUSTER_GROW;
+    CLUSTER_GROW;
+
+    CLUSTER_CONFIGURATION(&configuration);
+    rv = raft_bootstrap(CLUSTER_RAFT(0), &configuration);
     munit_assert_int(rv, ==, 0);
+    raft_configuration_close(&configuration);
 
     entry.type = RAFT_COMMAND;
     entry.term = 3;
@@ -163,6 +159,9 @@ TEST_CASE(entries, two, NULL)
 
     CLUSTER_ADD_ENTRY(0, &entry);
     CLUSTER_SET_TERM(0, 3);
+
+    BOOTSTRAP(1);
+    BOOTSTRAP(2);
 
     CLUSTER_START;
     CLUSTER_ELECT(0);
@@ -178,81 +177,26 @@ TEST_CASE(entries, two, NULL)
     return MUNIT_OK;
 }
 
-/******************************************************************************
- *
- * Cluster with single voting server.
- *
- *****************************************************************************/
-
-struct single_voting_fixture
+/* There is a single voting server in the cluster, which immediately elects
+ * itself when starting. */
+TEST(raft_start, singleVotingSelfElect, setUp, tearDown, 0, NULL)
 {
-    FIXTURE_CLUSTER;
-};
-
-TEST_SUITE(single_voting)
-
-TEST_SETUP(single_voting)
-{
-    struct single_voting_fixture *f = munit_malloc(sizeof *f);
-    (void)user_data;
-    SETUP_CLUSTER(1);
+    struct fixture *f = data;
     CLUSTER_BOOTSTRAP;
     CLUSTER_START;
-    return f;
-}
-
-TEST_TEAR_DOWN(single_voting)
-{
-    struct single_voting_fixture *f = data;
-    TEAR_DOWN_CLUSTER;
-    free(f);
-}
-
-/* The server immediately elects itself */
-TEST_CASE(single_voting, self_elect, NULL)
-{
-    struct single_voting_fixture *f = data;
-    (void)params;
     munit_assert_int(CLUSTER_STATE(0), ==, RAFT_LEADER);
     CLUSTER_MAKE_PROGRESS;
     return MUNIT_OK;
 }
 
-/******************************************************************************
- *
- * Cluster with single voting server that is not us.
- *
- *****************************************************************************/
-
-struct single_voting_not_us_fixture
+/* There are two servers in the cluster, one is voting and the other is
+ * not. When started, the non-voting server does not elects itself. */
+TEST(raft_start, singleVotingNotUs, setUp, tearDown, 0, NULL)
 {
-    FIXTURE_CLUSTER;
-};
-
-TEST_SUITE(single_voting_not_us)
-
-TEST_SETUP(single_voting_not_us)
-{
-    struct single_voting_not_us_fixture *f = munit_malloc(sizeof *f);
-    (void)user_data;
-    SETUP_CLUSTER(2);
+    struct fixture *f = data;
+    CLUSTER_GROW;
     CLUSTER_BOOTSTRAP_N_VOTING(1);
     CLUSTER_START;
-    return f;
-}
-
-TEST_TEAR_DOWN(single_voting_not_us)
-{
-    struct single_voting_not_us_fixture *f = data;
-    TEAR_DOWN_CLUSTER;
-    free(f);
-}
-
-/* The server immediately elects itself */
-TEST_CASE(single_voting_not_us, dont_self_elect, NULL)
-{
-    struct single_voting_not_us_fixture *f = data;
-    (void)params;
     munit_assert_int(CLUSTER_STATE(1), ==, RAFT_FOLLOWER);
     CLUSTER_MAKE_PROGRESS;
     return MUNIT_OK;

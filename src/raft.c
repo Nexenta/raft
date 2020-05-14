@@ -1,46 +1,41 @@
-#include <string.h>
-
 #include "../include/raft.h"
 
+#include <string.h>
+
 #include "assert.h"
+#include "byte.h"
 #include "configuration.h"
 #include "convert.h"
 #include "election.h"
+#include "err.h"
+#include "heap.h"
 #include "log.h"
-#include "logging.h"
+#include "membership.h"
+#include "tracing.h"
 
 #define DEFAULT_ELECTION_TIMEOUT 1000 /* One second */
 #define DEFAULT_HEARTBEAT_TIMEOUT 100 /* One tenth of a second */
 #define DEFAULT_SNAPSHOT_THRESHOLD 1024
 #define DEFAULT_SNAPSHOT_TRAILING 2048
 
-/* Set to 1 to enable tracing. */
-#if 0
-#define tracef(MSG, ...) debugf(r, MSG, ##__VA_ARGS__)
-#else
-#define tracef(MSG, ...)
-#endif
-
 int raft_init(struct raft *r,
               struct raft_io *io,
               struct raft_fsm *fsm,
-              struct raft_logger *logger,
-              const unsigned id,
+              const raft_id id,
               const char *address)
 {
     int rv;
-
     assert(r != NULL);
-
     r->io = io;
     r->io->data = r;
     r->fsm = fsm;
-    r->logger = logger;
+    r->tracer = &NoopTracer;
     r->id = id;
     /* Make a copy of the address */
-    r->address = raft_malloc(strlen(address) + 1);
+    r->address = HeapMalloc(strlen(address) + 1);
     if (r->address == NULL) {
-        return RAFT_NOMEM;
+        rv = RAFT_NOMEM;
+        goto err;
     }
     strcpy(r->address, address);
     r->current_term = 0;
@@ -55,27 +50,33 @@ int raft_init(struct raft *r,
     r->last_applied = 0;
     r->last_stored = 0;
     r->state = RAFT_UNAVAILABLE;
+    r->transfer = NULL;
     r->snapshot.pending.term = 0;
     r->snapshot.threshold = DEFAULT_SNAPSHOT_THRESHOLD;
     r->snapshot.trailing = DEFAULT_SNAPSHOT_TRAILING;
     r->snapshot.put.data = NULL;
     r->close_cb = NULL;
-    rv = r->io->init(r->io, r->logger, r->id, r->address);
+    memset(r->errmsg, 0, sizeof r->errmsg);
+    rv = r->io->init(r->io, r->id, r->address);
     if (rv != 0) {
-        return rv;
+        ErrMsgTransfer(r->io->errmsg, r->errmsg, "io");
+        goto err_after_address_alloc;
     }
     return 0;
+
+err_after_address_alloc:
+    HeapFree(r->address);
+err:
+    assert(rv != 0);
+    return rv;
 }
 
-static void io_close_cb(struct raft_io *io)
+static void ioCloseCb(struct raft_io *io)
 {
     struct raft *r = io->data;
-    infof(r, "stopped");
-
     raft_free(r->address);
     logClose(&r->log);
     raft_configuration_close(&r->configuration);
-
     if (r->close_cb != NULL) {
         r->close_cb(r);
     }
@@ -83,13 +84,12 @@ static void io_close_cb(struct raft_io *io)
 
 void raft_close(struct raft *r, void (*cb)(struct raft *r))
 {
-    assert(r != NULL);
     assert(r->close_cb == NULL);
     if (r->state != RAFT_UNAVAILABLE) {
         convertToUnavailable(r);
     }
     r->close_cb = cb;
-    r->io->close(r->io, io_close_cb);
+    r->io->close(r->io, ioCloseCb);
 }
 
 void raft_set_election_timeout(struct raft *r, const unsigned msecs)
@@ -112,11 +112,18 @@ void raft_set_snapshot_trailing(struct raft *r, unsigned n)
     r->snapshot.trailing = n;
 }
 
+const char *raft_errmsg(struct raft *r)
+{
+    return r->errmsg;
+}
+
 int raft_bootstrap(struct raft *r, const struct raft_configuration *conf)
 {
     int rv;
 
-    assert(r->state == RAFT_UNAVAILABLE);
+    if (r->state != RAFT_UNAVAILABLE) {
+        return RAFT_BUSY;
+    }
 
     rv = r->io->bootstrap(r->io, conf);
     if (rv != 0) {
@@ -124,4 +131,66 @@ int raft_bootstrap(struct raft *r, const struct raft_configuration *conf)
     }
 
     return 0;
+}
+
+int raft_recover(struct raft *r, const struct raft_configuration *conf)
+{
+    int rv;
+
+    if (r->state != RAFT_UNAVAILABLE) {
+        return RAFT_BUSY;
+    }
+
+    rv = r->io->recover(r->io, conf);
+    if (rv != 0) {
+        return rv;
+    }
+
+    return 0;
+}
+
+const char *raft_strerror(int errnum)
+{
+    return errCodeToString(errnum);
+}
+
+void raft_configuration_init(struct raft_configuration *c)
+{
+    configurationInit(c);
+}
+
+void raft_configuration_close(struct raft_configuration *c)
+{
+    configurationClose(c);
+}
+
+int raft_configuration_add(struct raft_configuration *c,
+                           const raft_id id,
+                           const char *address,
+                           const int role)
+{
+    return configurationAdd(c, id, address, role);
+}
+
+int raft_configuration_encode(const struct raft_configuration *c,
+                              struct raft_buffer *buf)
+{
+    return configurationEncode(c, buf);
+}
+
+unsigned long long raft_digest(const char *text, unsigned long long n)
+{
+    struct byteSha1 sha1;
+    uint8_t value[20];
+    uint64_t n64 = byteFlip64((uint64_t)n);
+    uint64_t digest;
+
+    byteSha1Init(&sha1);
+    byteSha1Update(&sha1, (const uint8_t *)text, (uint32_t)strlen(text));
+    byteSha1Update(&sha1, (const uint8_t *)&n64, (uint32_t)(sizeof n64));
+    byteSha1Digest(&sha1, value);
+
+    memcpy(&digest, value + (sizeof value - sizeof digest), sizeof digest);
+
+    return byteFlip64(digest);
 }

@@ -1,34 +1,41 @@
 #include "convert.h"
+
 #include "assert.h"
 #include "configuration.h"
 #include "election.h"
 #include "log.h"
+#include "membership.h"
 #include "progress.h"
 #include "queue.h"
 #include "request.h"
 
+/* Set to 1 to enable tracing. */
+#if 0
+#define tracef(...) Tracef(r->tracer, __VA_ARGS__)
+#else
+#define tracef(...)
+#endif
+
 /* Convenience for setting a new state value and asserting that the transition
  * is valid. */
-static void setState(struct raft *r, int new_state)
+static void convertSetState(struct raft *r, unsigned short new_state)
 {
-    int old_state = r->state;
-
     /* Check that the transition is legal, see Figure 3.3. Note that with
      * respect to the paper we have an additional "unavailable" state, which is
      * the initial or final state. */
-    assert((old_state == RAFT_UNAVAILABLE && new_state == RAFT_FOLLOWER) ||
-           (old_state == RAFT_FOLLOWER && new_state == RAFT_CANDIDATE) ||
-           (old_state == RAFT_CANDIDATE && new_state == RAFT_FOLLOWER) ||
-           (old_state == RAFT_CANDIDATE && new_state == RAFT_LEADER) ||
-           (old_state == RAFT_LEADER && new_state == RAFT_FOLLOWER) ||
-           (old_state == RAFT_FOLLOWER && new_state == RAFT_UNAVAILABLE) ||
-           (old_state == RAFT_CANDIDATE && new_state == RAFT_UNAVAILABLE) ||
-           (old_state == RAFT_LEADER && new_state == RAFT_UNAVAILABLE));
+    assert((r->state == RAFT_UNAVAILABLE && new_state == RAFT_FOLLOWER) ||
+           (r->state == RAFT_FOLLOWER && new_state == RAFT_CANDIDATE) ||
+           (r->state == RAFT_CANDIDATE && new_state == RAFT_FOLLOWER) ||
+           (r->state == RAFT_CANDIDATE && new_state == RAFT_LEADER) ||
+           (r->state == RAFT_LEADER && new_state == RAFT_FOLLOWER) ||
+           (r->state == RAFT_FOLLOWER && new_state == RAFT_UNAVAILABLE) ||
+           (r->state == RAFT_CANDIDATE && new_state == RAFT_UNAVAILABLE) ||
+           (r->state == RAFT_LEADER && new_state == RAFT_UNAVAILABLE));
     r->state = new_state;
 }
 
 /* Clear follower state. */
-static void clearFollower(struct raft *r)
+static void convertClearFollower(struct raft *r)
 {
     r->follower_state.current_leader.id = 0;
     if (r->follower_state.current_leader.address != NULL) {
@@ -38,7 +45,7 @@ static void clearFollower(struct raft *r)
 }
 
 /* Clear candidate state. */
-static void clearCandidate(struct raft *r)
+static void convertClearCandidate(struct raft *r)
 {
     if (r->candidate_state.votes != NULL) {
         raft_free(r->candidate_state.votes);
@@ -46,21 +53,21 @@ static void clearCandidate(struct raft *r)
     }
 }
 
-static void failApply(struct raft_apply *req)
+static void convertFailApply(struct raft_apply *req)
 {
     if (req != NULL && req->cb != NULL) {
         req->cb(req, RAFT_LEADERSHIPLOST, NULL);
     }
 }
 
-static void failBarrier(struct raft_barrier *req)
+static void convertFailBarrier(struct raft_barrier *req)
 {
     if (req != NULL && req->cb != NULL) {
         req->cb(req, RAFT_LEADERSHIPLOST);
     }
 }
 
-static void failChange(struct raft_change *req)
+static void convertFailChange(struct raft_change *req)
 {
     if (req != NULL && req->cb != NULL) {
         req->cb(req, RAFT_LEADERSHIPLOST);
@@ -68,7 +75,7 @@ static void failChange(struct raft_change *req)
 }
 
 /* Clear leader state. */
-static void clearLeader(struct raft *r)
+static void convertClearLeader(struct raft *r)
 {
     if (r->leader_state.progress != NULL) {
         raft_free(r->leader_state.progress);
@@ -82,17 +89,13 @@ static void clearLeader(struct raft *r)
         head = QUEUE_HEAD(&r->leader_state.requests);
         QUEUE_REMOVE(head);
         req = QUEUE_DATA(head, struct request, queue);
+        assert(req->type == RAFT_COMMAND || req->type == RAFT_BARRIER);
         switch (req->type) {
             case RAFT_COMMAND:
-                failApply((struct raft_apply *)req);
+                convertFailApply((struct raft_apply *)req);
                 break;
             case RAFT_BARRIER:
-                failBarrier((struct raft_barrier *)req);
-                break;
-            case RAFT_CHANGE:
-                failChange((struct raft_change *)req);
-                assert(r->leader_state.change == (struct raft_change *)req);
-                r->leader_state.change = NULL;
+                convertFailBarrier((struct raft_barrier *)req);
                 break;
         };
     }
@@ -100,33 +103,33 @@ static void clearLeader(struct raft *r)
     /* Fail any promote request that is still outstanding because the server is
      * still catching up and no entry was submitted. */
     if (r->leader_state.change != NULL) {
-        failChange(r->leader_state.change);
+        convertFailChange(r->leader_state.change);
         r->leader_state.change = NULL;
     }
 }
 
 /* Clear the current state */
-static void clear(struct raft *r)
+static void convertClear(struct raft *r)
 {
     assert(r->state == RAFT_UNAVAILABLE || r->state == RAFT_FOLLOWER ||
            r->state == RAFT_CANDIDATE || r->state == RAFT_LEADER);
     switch (r->state) {
         case RAFT_FOLLOWER:
-            clearFollower(r);
+            convertClearFollower(r);
             break;
         case RAFT_CANDIDATE:
-            clearCandidate(r);
+            convertClearCandidate(r);
             break;
         case RAFT_LEADER:
-            clearLeader(r);
+            convertClearLeader(r);
             break;
     }
 }
 
 void convertToFollower(struct raft *r)
 {
-    clear(r);
-    setState(r, RAFT_FOLLOWER);
+    convertClear(r);
+    convertSetState(r, RAFT_FOLLOWER);
 
     /* Reset election timer. */
     electionResetTimer(r);
@@ -135,22 +138,36 @@ void convertToFollower(struct raft *r)
     r->follower_state.current_leader.address = NULL;
 }
 
-int convertToCandidate(struct raft *r)
+int convertToCandidate(struct raft *r, bool disrupt_leader)
 {
-    size_t n_voting = configurationNumVoting(&r->configuration);
+    const struct raft_server *server;
+    size_t n_voters = configurationVoterCount(&r->configuration);
     int rv;
 
-    clear(r);
-    setState(r, RAFT_CANDIDATE);
+    (void)server; /* Only used for assertions. */
+
+    convertClear(r);
+    convertSetState(r, RAFT_CANDIDATE);
 
     /* Allocate the votes array. */
-    r->candidate_state.votes = raft_malloc(n_voting * sizeof(bool));
+    r->candidate_state.votes = raft_malloc(n_voters * sizeof(bool));
     if (r->candidate_state.votes == NULL) {
         return RAFT_NOMEM;
     }
 
+    /* Fast-forward to leader if we're the only voting server in the
+     * configuration. */
+    server = configurationGet(&r->configuration, r->id);
+    assert(server != NULL);
+    assert(server->role == RAFT_VOTER);
+
+    if (n_voters == 1) {
+        tracef("self elect and convert to leader");
+        return convertToLeader(r);
+    }
+
     /* Start a new election round */
-    rv = electionStart(r);
+    rv = electionStart(r, disrupt_leader);
     if (rv != 0) {
         r->state = RAFT_FOLLOWER;
         raft_free(r->candidate_state.votes);
@@ -164,8 +181,8 @@ int convertToLeader(struct raft *r)
 {
     int rv;
 
-    clear(r);
-    setState(r, RAFT_LEADER);
+    convertClear(r);
+    convertSetState(r, RAFT_LEADER);
 
     /* Reset timers */
     r->election_timer_start = r->io->time(r->io);
@@ -192,6 +209,12 @@ int convertToLeader(struct raft *r)
 
 void convertToUnavailable(struct raft *r)
 {
-    clear(r);
-    setState(r, RAFT_UNAVAILABLE);
+    /* Abort any pending leadership transfer request. */
+    if (r->transfer != NULL) {
+        membershipLeadershipTransferClose(r);
+    }
+    convertClear(r);
+    convertSetState(r, RAFT_UNAVAILABLE);
 }
+
+#undef tracef

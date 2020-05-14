@@ -1,23 +1,17 @@
 #include "election.h"
+
 #include "assert.h"
 #include "configuration.h"
+#include "heap.h"
 #include "log.h"
-#include "logging.h"
+#include "tracing.h"
 
 /* Set to 1 to enable tracing. */
 #if 0
-#define tracef(...) debugf(r, ##__VA_ARGS__)
+#define tracef(...) Tracef(r->tracer, __VA_ARGS__)
 #else
 #define tracef(...)
 #endif
-
-/* Vote request context */
-struct request
-{
-    struct raft *raft;
-    struct raft_io_send send;
-    unsigned server_id;
-};
 
 /* Common fields between follower and candidate state.
  *
@@ -44,8 +38,8 @@ struct followerOrCandidateState *getFollowerOrCandidateState(struct raft *r)
 void electionResetTimer(struct raft *r)
 {
     struct followerOrCandidateState *state = getFollowerOrCandidateState(r);
-    unsigned timeout =
-        r->io->random(r->io, r->election_timeout, 2 * r->election_timeout);
+    unsigned timeout = (unsigned)r->io->random(r->io, (int)r->election_timeout,
+                                               2 * (int)r->election_timeout);
     assert(timeout >= r->election_timeout);
     assert(timeout <= r->election_timeout * 2);
     state->randomized_election_timeout = timeout;
@@ -61,20 +55,17 @@ bool electionTimerExpired(struct raft *r)
 
 static void sendRequestVoteCb(struct raft_io_send *send, int status)
 {
-    struct request *req = send->data;
-    struct raft *r = req->raft;
-    if (status != 0) {
-        warnf(r, "failed to send vote request to server %ld: %s",
-              req->server_id, raft_strerror(status));
-    }
-    raft_free(req);
+    (void)status;
+    HeapFree(send);
 }
 
 /* Send a RequestVote RPC to the given server. */
-static int sendRequestVote(struct raft *r, const struct raft_server *server)
+static int electionSend(struct raft *r,
+                        const struct raft_server *server,
+                        bool disrupt_leader)
 {
     struct raft_message message;
-    struct request *req;
+    struct raft_io_send *send;
     int rv;
     assert(server->id != r->id);
     assert(server->id != 0);
@@ -84,48 +75,47 @@ static int sendRequestVote(struct raft *r, const struct raft_server *server)
     message.request_vote.candidate_id = r->id;
     message.request_vote.last_log_index = logLastIndex(&r->log);
     message.request_vote.last_log_term = logLastTerm(&r->log);
+    message.request_vote.disrupt_leader = disrupt_leader;
     message.server_id = server->id;
     message.server_address = server->address;
 
-    req = raft_malloc(sizeof *req);
-    if (req == NULL) {
+    send = HeapMalloc(sizeof *send);
+    if (send == NULL) {
         return RAFT_NOMEM;
     }
 
-    req->raft = r;
-    req->send.data = req;
-    req->server_id = server->id;
+    send->data = r;
 
-    rv = r->io->send(r->io, &req->send, &message, sendRequestVoteCb);
+    rv = r->io->send(r->io, send, &message, sendRequestVoteCb);
     if (rv != 0) {
-        raft_free(req);
+        HeapFree(send);
         return rv;
     }
 
     return 0;
 }
 
-int electionStart(struct raft *r)
+int electionStart(struct raft *r, bool disrupt_leader)
 {
     raft_term term;
-    size_t n_voting;
+    size_t n_voters;
     size_t voting_index;
     size_t i;
     int rv;
     assert(r->state == RAFT_CANDIDATE);
 
-    n_voting = configurationNumVoting(&r->configuration);
-    voting_index = configurationIndexOfVoting(&r->configuration, r->id);
+    n_voters = configurationVoterCount(&r->configuration);
+    voting_index = configurationIndexOfVoter(&r->configuration, r->id);
 
     /* This function should not be invoked if we are not a voting server, hence
      * voting_index must be lower than the number of servers in the
      * configuration (meaning that we are a voting server). */
     assert(voting_index < r->configuration.n);
 
-    /* Sanity check that configurationNumVoting and configurationIndexOfVoting
+    /* Sanity check that configurationVoterCount and configurationIndexOfVoter
      * have returned somethig that makes sense. */
-    assert(n_voting <= r->configuration.n);
-    assert(voting_index < n_voting);
+    assert(n_voters <= r->configuration.n);
+    assert(voting_index < n_voters);
 
     /* Increment current term */
     term = r->current_term + 1;
@@ -150,7 +140,7 @@ int electionStart(struct raft *r)
     assert(r->candidate_state.votes != NULL);
 
     /* Initialize the votes array and send vote requests. */
-    for (i = 0; i < n_voting; i++) {
+    for (i = 0; i < n_voters; i++) {
         if (i == voting_index) {
             r->candidate_state.votes[i] = true; /* We vote for ourselves */
         } else {
@@ -159,14 +149,14 @@ int electionStart(struct raft *r)
     }
     for (i = 0; i < r->configuration.n; i++) {
         const struct raft_server *server = &r->configuration.servers[i];
-        if (server->id == r->id || !server->voting) {
+        if (server->id == r->id || server->role != RAFT_VOTER) {
             continue;
         }
-        rv = sendRequestVote(r, server);
+        rv = electionSend(r, server, disrupt_leader);
         if (rv != 0) {
             /* This is not a critical failure, let's just log it. */
-            warnf(r, "failed to send vote request to server %ld: %s",
-                  server->id, raft_strerror(rv));
+            tracef("failed to send vote request to server %u: %s", server->id,
+                   raft_strerror(rv));
         }
     }
 
@@ -194,7 +184,7 @@ int electionVote(struct raft *r,
 
     *granted = false;
 
-    if (local_server == NULL || !local_server->voting) {
+    if (local_server == NULL || local_server->role != RAFT_VOTER) {
         tracef("local server is not voting -> not granting vote");
         return 0;
     }
@@ -263,17 +253,17 @@ grant_vote:
 
 bool electionTally(struct raft *r, size_t voter_index)
 {
-    size_t n_voting = configurationNumVoting(&r->configuration);
+    size_t n_voters = configurationVoterCount(&r->configuration);
     size_t votes = 0;
     size_t i;
-    size_t half = n_voting / 2;
+    size_t half = n_voters / 2;
 
     assert(r->state == RAFT_CANDIDATE);
     assert(r->candidate_state.votes != NULL);
 
     r->candidate_state.votes[voter_index] = true;
 
-    for (i = 0; i < n_voting; i++) {
+    for (i = 0; i < n_voters; i++) {
         if (r->candidate_state.votes[i]) {
             votes++;
         }
@@ -281,3 +271,5 @@ bool electionTally(struct raft *r, size_t voter_index)
 
     return votes >= half + 1;
 }
+
+#undef tracef

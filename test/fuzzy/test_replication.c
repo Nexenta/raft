@@ -1,8 +1,6 @@
 #include "../lib/cluster.h"
 #include "../lib/runner.h"
 
-TEST_MODULE(replication)
-
 /******************************************************************************
  *
  * Fixture
@@ -21,10 +19,9 @@ static MunitParameterEnum _params[] = {
     {NULL, NULL},
 };
 
-static void *setup(const MunitParameter params[], void *user_data)
+static void *setup(const MunitParameter params[], MUNIT_UNUSED void *user_data)
 {
     struct fixture *f = munit_malloc(sizeof *f);
-    (void)user_data;
     SETUP_CLUSTER(0);
     CLUSTER_BOOTSTRAP;
     CLUSTER_RANDOMIZE;
@@ -54,12 +51,10 @@ static void tear_down(void *data)
  *
  *****************************************************************************/
 
-TEST_SUITE(entries)
-TEST_SETUP(entries, setup)
-TEST_TEAR_DOWN(entries, tear_down)
+SUITE(replication)
 
 /* New entries on the leader are eventually replicated to followers. */
-TEST_CASE(entries, append, _params)
+TEST(replication, appendEntries, setup, tear_down, 0, _params)
 {
     struct fixture *f = data;
     struct raft_apply *req = munit_malloc(sizeof *req);
@@ -72,7 +67,7 @@ TEST_CASE(entries, append, _params)
 
 /* The cluster remains available even if the current leader dies and a new
  * leader gets elected. */
-TEST_CASE(entries, availability, _params)
+TEST(replication, availability, setup, tear_down, 0, _params)
 {
     struct fixture *f = data;
     struct raft_apply *req1 = munit_malloc(sizeof *req1);
@@ -104,7 +99,7 @@ static void apply_cb(struct raft_apply *req, int status, void *result)
 }
 
 /* If no quorum is available, entries don't get committed. */
-TEST_CASE(entries, no_quorum, _params)
+TEST(replication, noQuorum, setup, tear_down, 0, _params)
 {
     struct fixture *f = data;
     struct raft_apply *req = munit_malloc(sizeof *req);
@@ -125,7 +120,7 @@ TEST_CASE(entries, no_quorum, _params)
 }
 
 /* If the cluster is partitioned, entries don't get committed. */
-TEST_CASE(entries, partitioned, _params)
+TEST(replication, partitioned, setup, tear_down, 0, _params)
 {
     struct fixture *f = data;
     struct raft_apply *req1 = munit_malloc(sizeof *req1);

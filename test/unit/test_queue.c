@@ -1,12 +1,9 @@
 #include "../../src/queue.h"
-
 #include "../lib/runner.h"
-
-TEST_MODULE(queue)
 
 /******************************************************************************
  *
- * Fixture
+ * Fixture with a single queue.
  *
  *****************************************************************************/
 
@@ -15,32 +12,31 @@ struct fixture
     void *queue[2];
 };
 
-static void *setup(const MunitParameter params[], void *user_data)
+static void *setUp(MUNIT_UNUSED const MunitParameter params[],
+                   MUNIT_UNUSED void *user_data)
 {
     struct fixture *f = munit_malloc(sizeof *f);
-    (void)params;
-    (void)user_data;
     QUEUE_INIT(&f->queue);
     return f;
 }
 
-static void tear_down(void *data)
+static void tearDown(void *data)
 {
     struct fixture *f = data;
     free(f);
 }
-
-struct item
-{
-    int value;
-    void *queue[2];
-};
 
 /******************************************************************************
  *
  * Helper macros
  *
  *****************************************************************************/
+
+struct item
+{
+    int value;
+    void *queue[2];
+};
 
 /* Initialize and push the given items to the fixture's queue. Each item will
  * have a value equal to its index plus one. */
@@ -95,24 +91,19 @@ struct item
  *
  *****************************************************************************/
 
-TEST_SUITE(is_empty)
+SUITE(QUEUE_IS_EMPTY)
 
-TEST_SETUP(is_empty, setup)
-TEST_TEAR_DOWN(is_empty, tear_down)
-
-TEST_CASE(is_empty, yes, NULL)
+TEST(QUEUE_IS_EMPTY, yes, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
-    (void)params;
     ASSERT_EMPTY;
     return MUNIT_OK;
 }
 
-TEST_CASE(is_empty, no, NULL)
+TEST(QUEUE_IS_EMPTY, no, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[1];
-    (void)params;
     PUSH(items);
     ASSERT_NOT_EMPTY;
     return MUNIT_OK;
@@ -124,27 +115,22 @@ TEST_CASE(is_empty, no, NULL)
  *
  *****************************************************************************/
 
-TEST_SUITE(push)
+SUITE(QUEUE_PUSH)
 
-TEST_SETUP(push, setup)
-TEST_TEAR_DOWN(push, tear_down)
-
-TEST_CASE(push, one, NULL)
+TEST(QUEUE_PUSH, one, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[1];
-    (void)params;
     PUSH(items);
     ASSERT_HEAD(1);
     return MUNIT_OK;
 }
 
-TEST_CASE(push, two, NULL)
+TEST(QUEUE_PUSH, two, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[2];
     int i;
-    (void)params;
     PUSH(items);
     for (i = 0; i < 2; i++) {
         ASSERT_HEAD(i + 1);
@@ -160,38 +146,32 @@ TEST_CASE(push, two, NULL)
  *
  *****************************************************************************/
 
-TEST_SUITE(remove)
+SUITE(QUEUE_REMOVE)
 
-TEST_SETUP(remove, setup)
-TEST_TEAR_DOWN(remove, tear_down)
-
-TEST_CASE(remove, first, NULL)
+TEST(QUEUE_REMOVE, first, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[3];
-    (void)params;
     PUSH(items);
     REMOVE(items, 0);
     ASSERT_HEAD(2);
     return MUNIT_OK;
 }
 
-TEST_CASE(remove, second, NULL)
+TEST(QUEUE_REMOVE, second, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[3];
-    (void)params;
     PUSH(items);
     REMOVE(items, 1);
     ASSERT_HEAD(1);
     return MUNIT_OK;
 }
 
-TEST_CASE(remove, success, NULL)
+TEST(QUEUE_REMOVE, success, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[3];
-    (void)params;
     PUSH(items);
     REMOVE(items, 2);
     ASSERT_HEAD(1);
@@ -204,36 +184,30 @@ TEST_CASE(remove, success, NULL)
  *
  *****************************************************************************/
 
-TEST_SUITE(tail)
+SUITE(QUEUE_TAIL)
 
-TEST_SETUP(tail, setup)
-TEST_TEAR_DOWN(tail, tear_down)
-
-TEST_CASE(tail, one, NULL)
+TEST(QUEUE_TAIL, one, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[1];
-    (void)params;
     PUSH(items);
     ASSERT_TAIL(1);
     return MUNIT_OK;
 }
 
-TEST_CASE(tail, two, NULL)
+TEST(QUEUE_TAIL, two, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[2];
-    (void)params;
     PUSH(items);
     ASSERT_TAIL(2);
     return MUNIT_OK;
 }
 
-TEST_CASE(tail, three, NULL)
+TEST(QUEUE_TAIL, three, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[3];
-    (void)params;
     PUSH(items);
     ASSERT_TAIL(3);
     return MUNIT_OK;
@@ -245,47 +219,50 @@ TEST_CASE(tail, three, NULL)
  *
  *****************************************************************************/
 
-TEST_SUITE(foreach)
-
-TEST_SETUP(foreach, setup)
-TEST_TEAR_DOWN(foreach, tear_down)
+SUITE(QUEUE_FOREACH)
 
 /* Loop through a queue of zero items. */
-TEST_CASE(foreach, zero, NULL)
+TEST(QUEUE_FOREACH, zero, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     queue *head;
     int count = 0;
-    (void)params;
     QUEUE_FOREACH(head, &f->queue) { count++; }
     munit_assert_int(count, ==, 0);
     return MUNIT_OK;
 }
 
 /* Loop through a queue of one item. */
-TEST_CASE(foreach, one, NULL)
+TEST(QUEUE_FOREACH, one, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[1];
     queue *head;
     int count = 0;
-    (void)params;
     PUSH(items);
     QUEUE_FOREACH(head, &f->queue) { count++; }
     munit_assert_int(count, ==, 1);
     return MUNIT_OK;
 }
 
-/* Loop through a queue of two items. */
-TEST_CASE(foreach, two, NULL)
+/* Loop through a queue of two items. The order of the loop is from the head to
+ * the tail. */
+TEST(QUEUE_FOREACH, two, setUp, tearDown, 0, NULL)
 {
     struct fixture *f = data;
     struct item items[2];
     queue *head;
-    int count = 0;
-    (void)params;
+    int values[2] = {0, 0};
+    int i = 0;
     PUSH(items);
-    QUEUE_FOREACH(head, &f->queue) { count++; }
-    munit_assert_int(count, ==, 2);
+    QUEUE_FOREACH(head, &f->queue)
+    {
+        struct item *item;
+        item = QUEUE_DATA(head, struct item, queue);
+        values[i] = item->value;
+        i++;
+    }
+    munit_assert_int(values[0], ==, 1);
+    munit_assert_int(values[1], ==, 2);
     return MUNIT_OK;
 }

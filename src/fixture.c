@@ -1,17 +1,24 @@
+#include "../include/raft/fixture.h"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "../include/raft/fixture.h"
-
 #include "assert.h"
 #include "configuration.h"
 #include "entry.h"
 #include "log.h"
-#include "logging.h"
 #include "queue.h"
 #include "snapshot.h"
+#include "tracing.h"
+
+/* Set to 1 to enable tracing. */
+#if 0
+#define tracef(...) Tracef(r->tracer, __VA_ARGS__)
+#else
+#define tracef(...)
+#endif
 
 /* Defaults */
 #define HEARTBEAT_TIMEOUT 100
@@ -21,43 +28,6 @@
 
 /* To keep in sync with raft.h */
 #define N_MESSAGE_TYPES 5
-
-/* Set to 1 to enable tracing. */
-#if 0
-static char messageDescription[1024];
-
-/* Return a human-readable description of the given message */
-static char *describeMessage(const struct raft_message *m)
-{
-    char *d = messageDescription;
-    switch (m->type) {
-        case RAFT_IO_REQUEST_VOTE:
-            sprintf(d, "request vote");
-            break;
-        case RAFT_IO_REQUEST_VOTE_RESULT:
-            sprintf(d, "request vote result");
-            break;
-        case RAFT_IO_APPEND_ENTRIES:
-            sprintf(d, "append entries (n %u prev %llu/%llu)",
-                    m->append_entries.n_entries,
-                    m->append_entries.prev_log_index,
-                    m->append_entries.prev_log_term);
-            break;
-        case RAFT_IO_APPEND_ENTRIES_RESULT:
-            sprintf(d, "append entries result");
-            break;
-        case RAFT_IO_INSTALL_SNAPSHOT:
-            sprintf(d, "install snapshot");
-            break;
-        default:
-            assert(0);
-    }
-    return d;
-}
-#    define tracef(MSG, ...) debugf(io->io, MSG, ##__VA_ARGS__)
-#else
-#    define tracef(MSG, ...)
-#endif
 
 /* Maximum number of peer stub instances connected to a certain stub
  * instance. This should be enough for testing purposes. */
@@ -74,7 +44,7 @@ enum { APPEND = 1, SEND, TRANSMIT, SNAPSHOT_PUT, SNAPSHOT_GET };
 
 /* Abstract base type for an asynchronous request submitted to the stub I/o
  * implementation. */
-struct request
+struct ioRequest
 {
     REQUEST;
 };
@@ -101,6 +71,7 @@ struct send
 struct snapshot_put
 {
     REQUEST;
+    unsigned trailing;
     struct raft_io_snapshot_put *req;
     const struct raft_snapshot *snapshot;
 };
@@ -139,7 +110,7 @@ struct io
 
     /* Term and vote */
     raft_term term;
-    unsigned voted_for;
+    raft_id voted_for;
 
     /* Log */
     struct raft_snapshot *snapshot; /* Latest snapshot */
@@ -147,7 +118,7 @@ struct io
     size_t n;                       /* Size of the persisted entries array */
 
     /* Parameters passed via raft_io->init and raft_io->start */
-    unsigned id;
+    raft_id id;
     const char *address;
     unsigned tick_interval;
     raft_io_tick_cb tick_cb;
@@ -217,12 +188,10 @@ static bool ioFaultTick(struct io *io)
 }
 
 static int ioMethodInit(struct raft_io *raft_io,
-                        struct raft_logger *logger,
-                        unsigned id,
+                        raft_id id,
                         const char *address)
 {
     struct io *io = raft_io->impl;
-    (void)logger;
     io->id = id;
     io->address = address;
     return 0;
@@ -287,6 +256,11 @@ static void ioFlushSnapshotPut(struct io *s, struct snapshot_put *r)
     rv = snapshotCopy(r->snapshot, s->snapshot);
     assert(rv == 0);
 
+    if (r->trailing == 0) {
+        rv = s->io->truncate(s->io, 1);
+        assert(rv == 0);
+    }
+
     if (r->req->cb != NULL) {
         r->req->cb(r->req, 0);
     }
@@ -308,7 +282,7 @@ static void ioFlushSnapshotGet(struct io *s, struct snapshot_get *r)
 }
 
 /* Search for the peer with the given ID. */
-static struct peer *ioGetPeer(struct io *io, unsigned id)
+static struct peer *ioGetPeer(struct io *io, raft_id id)
 {
     unsigned i;
     for (i = 0; i < io->n_peers; i++) {
@@ -418,12 +392,12 @@ static void ioFlushAll(struct io *io)
 {
     while (!QUEUE_IS_EMPTY(&io->requests)) {
         queue *head;
-        struct request *r;
+        struct ioRequest *r;
 
         head = QUEUE_HEAD(&io->requests);
         QUEUE_REMOVE(head);
 
-        r = QUEUE_DATA(head, struct request, queue);
+        r = QUEUE_DATA(head, struct ioRequest, queue);
         switch (r->type) {
             case APPEND:
                 ioFlushAppend(io, (struct append *)r);
@@ -446,32 +420,16 @@ static void ioFlushAll(struct io *io)
     }
 }
 
-static int ioMethodClose(struct raft_io *raft_io,
-                         void (*cb)(struct raft_io *io))
+static void ioMethodClose(struct raft_io *raft_io, raft_io_close_cb cb)
 {
-    struct io *io = raft_io->impl;
-    size_t i;
-    for (i = 0; i < io->n; i++) {
-        struct raft_entry *entry = &io->entries[i];
-        raft_free(entry->buf.base);
-    }
-    if (io->entries != NULL) {
-        raft_free(io->entries);
-    }
-    if (io->snapshot != NULL) {
-        snapshotClose(io->snapshot);
-        raft_free(io->snapshot);
-    }
     if (cb != NULL) {
         cb(raft_io);
     }
-    return 0;
 }
 
 static int ioMethodLoad(struct raft_io *io,
-                        unsigned snapshot_trailing,
                         raft_term *term,
-                        unsigned *voted_for,
+                        raft_id *voted_for,
                         struct raft_snapshot **snapshot,
                         raft_index *start_index,
                         struct raft_entry **entries,
@@ -555,6 +513,15 @@ static int ioMethodBootstrap(struct raft_io *raft_io,
     return 0;
 }
 
+static int ioMethodRecover(struct raft_io *io,
+                           const struct raft_configuration *conf)
+{
+    /* TODO: implement this API */
+    (void)io;
+    (void)conf;
+    return RAFT_IOERR;
+}
+
 static int ioMethodSetTerm(struct raft_io *raft_io, const raft_term term)
 {
     struct io *io = raft_io->impl;
@@ -569,7 +536,7 @@ static int ioMethodSetTerm(struct raft_io *raft_io, const raft_term term)
     return 0;
 }
 
-static int ioMethodSetVote(struct raft_io *raft_io, const unsigned server_id)
+static int ioMethodSetVote(struct raft_io *raft_io, const raft_id server_id)
 {
     struct io *io = raft_io->impl;
 
@@ -577,7 +544,7 @@ static int ioMethodSetVote(struct raft_io *raft_io, const unsigned server_id)
         return RAFT_IOERR;
     }
 
-    tracef("io: set vote: %d %d", server_id, io->index);
+    /* tracef("io: set vote: %d %d", server_id, io->index); */
     io->voted_for = server_id;
 
     return 0;
@@ -616,21 +583,12 @@ static int ioMethodTruncate(struct raft_io *raft_io, raft_index index)
 {
     struct io *io = raft_io->impl;
     size_t n;
-    raft_index start_index;
-
-    if (io->snapshot == NULL) {
-        start_index = 1;
-    } else {
-        start_index = io->snapshot->index;
-    }
-
-    assert(index >= start_index);
 
     if (ioFaultTick(io)) {
         return RAFT_IOERR;
     }
 
-    n = index - 1; /* Number of entries left after truncation */
+    n = (size_t)(index - 1); /* Number of entries left after truncation */
 
     if (n > 0) {
         struct raft_entry *entries;
@@ -669,7 +627,7 @@ static int ioMethodTruncate(struct raft_io *raft_io, raft_index index)
 }
 
 static int ioMethodSnapshotPut(struct raft_io *raft_io,
-			       unsigned trailing,
+                               unsigned trailing,
                                struct raft_io_snapshot_put *req,
                                const struct raft_snapshot *snapshot,
                                raft_io_snapshot_put_cb cb)
@@ -685,6 +643,7 @@ static int ioMethodSnapshotPut(struct raft_io *raft_io,
     r->req->cb = cb;
     r->snapshot = snapshot;
     r->completion_time = *io->time + io->disk_latency;
+    r->trailing = trailing;
 
     QUEUE_PUSH(&io->requests, &r->queue);
 
@@ -723,7 +682,7 @@ static int ioMethodRandom(struct raft_io *raft_io, int min, int max)
     (void)min;
     (void)max;
     io = raft_io->impl;
-    return io->randomized_election_timeout;
+    return (int)io->randomized_election_timeout;
 }
 
 /* Queue up a request which will be processed later, when io_stub_flush()
@@ -740,8 +699,8 @@ static int ioMethodSend(struct raft_io *raft_io,
         return RAFT_IOERR;
     }
 
-    tracef("io: send: %s to server %d", describeMessage(message),
-           message->server_id);
+    /* tracef("io: send: %s to server %d", describeMessage(message),
+       message->server_id); */
 
     r = raft_malloc(sizeof *r);
     assert(r != NULL);
@@ -762,8 +721,8 @@ static int ioMethodSend(struct raft_io *raft_io,
 
 static void ioReceive(struct io *io, struct raft_message *message)
 {
-    tracef("io: recv: %s from server %d", describeMessage(message),
-           message->server_id);
+    /* tracef("io: recv: %s from server %d", describeMessage(message),
+       message->server_id); */
     io->recv_cb(io->io, message);
     io->n_recv[message->type]++;
 }
@@ -902,10 +861,11 @@ static int ioInit(struct raft_io *raft_io, unsigned index, raft_time *time)
 
     raft_io->impl = io;
     raft_io->init = ioMethodInit;
-    raft_io->start = ioMethodStart;
     raft_io->close = ioMethodClose;
+    raft_io->start = ioMethodStart;
     raft_io->load = ioMethodLoad;
     raft_io->bootstrap = ioMethodBootstrap;
+    raft_io->recover = ioMethodRecover;
     raft_io->set_term = ioMethodSetTerm;
     raft_io->set_vote = ioMethodSetVote;
     raft_io->append = ioMethodAppend;
@@ -920,32 +880,32 @@ static int ioInit(struct raft_io *raft_io, unsigned index, raft_time *time)
 }
 
 /* Release all memory held by the given stub I/O implementation. */
-void ioClose(struct raft_io *io)
+void ioClose(struct raft_io *raft_io)
 {
-    raft_free(io->impl);
+    struct io *io = raft_io->impl;
+    size_t i;
+    for (i = 0; i < io->n; i++) {
+        struct raft_entry *entry = &io->entries[i];
+        raft_free(entry->buf.base);
+    }
+    if (io->entries != NULL) {
+        raft_free(io->entries);
+    }
+    if (io->snapshot != NULL) {
+        snapshotClose(io->snapshot);
+        raft_free(io->snapshot);
+    }
+    raft_free(io);
 }
 
-/* Custom logging function which include the server ID. */
-static void emit(struct raft_logger *l,
-                 int level,
-                 raft_time time,
+/* Custom emit tracer function which include the server ID. */
+static void emit(struct raft_tracer *t,
                  const char *file,
                  int line,
-                 const char *format,
-                 ...)
+                 const char *message)
 {
-    va_list args;
-    unsigned id = *(unsigned *)l->impl;
-    char buf[2048];
-    (void)time;
-    if (level < l->level) {
-        return;
-    }
-    sprintf(buf, "%d: %30s:%*d - ", id, file, 3, line);
-    va_start(args, format);
-    vsprintf(buf + strlen(buf), format, args);
-    va_end(args);
-    fprintf(stderr, "%s\n", buf);
+    unsigned id = *(unsigned *)t->impl;
+    fprintf(stderr, "%d: %30s:%*d - %s\n", id, file, 3, line, message);
 }
 
 static int serverInit(struct raft_fixture *f, unsigned i, struct raft_fsm *fsm)
@@ -954,20 +914,20 @@ static int serverInit(struct raft_fixture *f, unsigned i, struct raft_fsm *fsm)
     struct raft_fixture_server *s = &f->servers[i];
     s->alive = true;
     s->id = i + 1;
-    sprintf(s->address, "%u", s->id);
+    sprintf(s->address, "%llu", s->id);
     rv = ioInit(&s->io, i, &f->time);
     if (rv != 0) {
         return rv;
     }
-    rv = raft_init(&s->raft, &s->io, fsm, &s->logger, s->id, s->address);
+    rv = raft_init(&s->raft, &s->io, fsm, s->id, s->address);
     if (rv != 0) {
         return rv;
     }
     raft_set_election_timeout(&s->raft, ELECTION_TIMEOUT);
     raft_set_heartbeat_timeout(&s->raft, HEARTBEAT_TIMEOUT);
-    s->logger.impl = (void *)&s->id;
-    s->logger.level = RAFT_INFO;
-    s->logger.emit = emit;
+    s->tracer.impl = (void *)&s->id;
+    s->tracer.emit = emit;
+    s->raft.tracer = &s->tracer;
     return 0;
 }
 
@@ -1044,10 +1004,10 @@ int raft_fixture_configuration(struct raft_fixture *f,
     raft_configuration_init(configuration);
     for (i = 0; i < f->n; i++) {
         struct raft_fixture_server *s;
-        bool voting = i < n_voting;
+        int role = i < n_voting ? RAFT_VOTER : RAFT_STANDBY;
         int rv;
         s = &f->servers[i];
-        rv = raft_configuration_add(configuration, s->id, s->address, voting);
+        rv = raft_configuration_add(configuration, s->id, s->address, role);
         if (rv != 0) {
             return rv;
         }
@@ -1109,12 +1069,12 @@ bool raft_fixture_alive(struct raft_fixture *f, unsigned i)
 unsigned raft_fixture_leader_index(struct raft_fixture *f)
 {
     if (f->leader_id != 0) {
-        return f->leader_id - 1;
+        return (unsigned)(f->leader_id - 1);
     }
     return f->n;
 }
 
-unsigned raft_fixture_voted_for(struct raft_fixture *f, unsigned i)
+raft_id raft_fixture_voted_for(struct raft_fixture *f, unsigned i)
 {
     struct io *io = f->servers[i].io.impl;
     return io->voted_for;
@@ -1132,7 +1092,7 @@ unsigned raft_fixture_voted_for(struct raft_fixture *f, unsigned i)
  */
 static bool updateLeaderAndCheckElectionSafety(struct raft_fixture *f)
 {
-    unsigned leader_id = 0;
+    raft_id leader_id = 0;
     unsigned leader_i = 0;
     raft_term leader_term = 0;
     unsigned i;
@@ -1158,7 +1118,7 @@ static bool updateLeaderAndCheckElectionSafety(struct raft_fixture *f)
 
             if (other->current_term == raft->current_term) {
                 fprintf(stderr,
-                        "server %u and %u are both leaders in term %llu",
+                        "server %llu and %llu are both leaders in term %llu",
                         raft->id, other->id, raft->current_term);
                 abort();
             }
@@ -1177,9 +1137,20 @@ static bool updateLeaderAndCheckElectionSafety(struct raft_fixture *f)
     if (leader_id != 0) {
         unsigned n_acks = 0;
         bool acked = true;
+        unsigned n_quorum = 0;
 
         for (i = 0; i < f->n; i++) {
             struct raft *raft = raft_fixture_get(f, i);
+            const struct raft_server *server =
+                configurationGet(&raft->configuration, raft->id);
+
+            /* If the server is not in the configuration or is idle, then don't
+             * count it. */
+            if (server == NULL || server->role == RAFT_SPARE) {
+                continue;
+            }
+
+            n_quorum++;
 
             /* If this server is itself the leader, or it's not alive or it's
              * not connected to the leader, then don't count it in for
@@ -1212,7 +1183,7 @@ static bool updateLeaderAndCheckElectionSafety(struct raft_fixture *f)
             n_acks++;
         }
 
-        if (!acked || n_acks < (f->n / 2)) {
+        if (!acked || n_acks < (n_quorum / 2)) {
             leader_id = 0;
         }
     }
@@ -1246,7 +1217,7 @@ static void checkLeaderAppendOnly(struct raft_fixture *f)
         return;
     }
 
-    raft = raft_fixture_get(f, f->leader_id - 1);
+    raft = raft_fixture_get(f, (unsigned)f->leader_id - 1);
     last = logLastIndex(&f->log);
 
     for (index = 1; index <= last; index++) {
@@ -1279,7 +1250,7 @@ static void checkLeaderAppendOnly(struct raft_fixture *f)
  * Append-Only check at the next iteration. */
 static void copyLeaderLog(struct raft_fixture *f)
 {
-    struct raft *raft = raft_fixture_get(f, f->leader_id - 1);
+    struct raft *raft = raft_fixture_get(f, (unsigned)f->leader_id - 1);
     struct raft_entry *entries;
     unsigned n;
     size_t i;
@@ -1303,7 +1274,7 @@ static void copyLeaderLog(struct raft_fixture *f)
 /* Update the commit index to match the one from the current leader. */
 static void updateCommitIndex(struct raft_fixture *f)
 {
-    struct raft *raft = raft_fixture_get(f, f->leader_id - 1);
+    struct raft *raft = raft_fixture_get(f, (unsigned)f->leader_id - 1);
     if (raft->commit_index > f->commit_index) {
         f->commit_index = raft->commit_index;
     }
@@ -1314,7 +1285,7 @@ static void updateCommitIndex(struct raft_fixture *f)
 static void getLowestTickTime(struct raft_fixture *f, raft_time *t, unsigned *i)
 {
     unsigned j;
-    *t = -1 /* Maximum value */;
+    *t = (raft_time)-1 /* Maximum value */;
     for (j = 0; j < f->n; j++) {
         struct io *io = f->servers[j].io.impl;
         if (io->next_tick < *t) {
@@ -1331,13 +1302,13 @@ static void getLowestRequestCompletionTime(struct raft_fixture *f,
                                            unsigned *i)
 {
     unsigned j;
-    *t = -1 /* Maximum value */;
+    *t = (raft_time)-1 /* Maximum value */;
     for (j = 0; j < f->n; j++) {
         struct io *io = f->servers[j].io.impl;
         queue *head;
         QUEUE_FOREACH(head, &io->requests)
         {
-            struct request *r = QUEUE_DATA(head, struct request, queue);
+            struct ioRequest *r = QUEUE_DATA(head, struct ioRequest, queue);
             if (r->completion_time < *t) {
                 *t = r->completion_time;
                 *i = j;
@@ -1362,13 +1333,13 @@ static void completeRequest(struct raft_fixture *f, unsigned i, raft_time t)
 {
     struct io *io = f->servers[i].io.impl;
     queue *head;
-    struct request *r;
+    struct ioRequest *r = NULL;
     bool found = false;
     f->time = t;
     f->event.server_index = i;
     QUEUE_FOREACH(head, &io->requests)
     {
-        r = QUEUE_DATA(head, struct request, queue);
+        r = QUEUE_DATA(head, struct ioRequest, queue);
         if (r->completion_time == t) {
             found = true;
             break;
@@ -1456,7 +1427,7 @@ bool raft_fixture_step_until(struct raft_fixture *f,
                              void *arg,
                              unsigned max_msecs)
 {
-    unsigned start = f->time;
+    raft_time start = f->time;
     while (!stop(f, arg) && (f->time - start) < max_msecs) {
         raft_fixture_step(f);
     }
@@ -1531,7 +1502,7 @@ static void minimizeRandomizedElectionTimeout(struct raft_fixture *f,
     /* If the minimum election timeout value would make the timer expire in the
      * past, cap it. */
     if (now - raft->election_timer_start > timeout) {
-        timeout = now - raft->election_timer_start;
+        timeout = (unsigned)(now - raft->election_timer_start);
     }
 
     raft->follower_state.randomized_election_timeout = timeout;
@@ -1568,7 +1539,8 @@ void raft_fixture_elect(struct raft_fixture *f, unsigned i)
     assert(f->leader_id == 0);
 
     /* Make sure that the given server is voting. */
-    assert(configurationGet(&raft->configuration, raft->id)->voting);
+    assert(configurationGet(&raft->configuration, raft->id)->role ==
+           RAFT_VOTER);
 
     /* Make sure all servers are currently followers. */
     for (j = 0; j < f->n; j++) {
@@ -1591,7 +1563,7 @@ void raft_fixture_depose(struct raft_fixture *f)
 
     /* Make sure there's a leader. */
     assert(f->leader_id != 0);
-    leader_i = f->leader_id - 1;
+    leader_i = (unsigned)f->leader_id - 1;
     assert(raft_state(&f->servers[leader_i].raft) == RAFT_LEADER);
 
     /* Set a very large election timeout on all followers, to prevent them from
@@ -1730,8 +1702,8 @@ static bool hasDelivered(struct raft_fixture *f, void *arg)
     io = raft->io->impl;
     QUEUE_FOREACH(head, &io->requests)
     {
-        struct request *r;
-        r = QUEUE_DATA(head, struct request, queue);
+        struct ioRequest *r;
+        r = QUEUE_DATA(head, struct ioRequest, queue);
         message = NULL;
         switch (r->type) {
             case SEND:
@@ -1905,3 +1877,5 @@ unsigned raft_fixture_n_recv(struct raft_fixture *f, unsigned i, int type)
     struct io *io = f->servers[i].io.impl;
     return io->n_recv[type];
 }
+
+#undef tracef
